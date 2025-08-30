@@ -8,6 +8,10 @@ from datetime import timedelta
 import math
 import json
 from PIL import Image, ImageDraw, ImageFont
+from fractions import Fraction
+import matplotlib.font_manager as fm
+import tempfile
+
 
 
 
@@ -158,13 +162,15 @@ def trim_video(input_file, start_time, end_time, output_file):
 
     cmd = [
         "ffmpeg",
-        "-i", input_file,
         "-ss", start_time,
         "-to", end_time,
-        "-c", "copy",
+        "-i", input_file,
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "18",
+        "-c:a", "copy",
         output_file
-    
-    ]
+]
 
     # ✅ Print the command before running
     print("Running command:", " ".join(cmd))
@@ -220,7 +226,7 @@ def check_file_type(filename):
         return "unknown"
 
 
-def make_rescaled_image(video_width, video_height, image_name, outfolder):
+def make_rescaled_image(video_width, video_height, image_name, output_filename):
     """
     Calculate dimensions to scale an image to fit within video dimensions
     while maintaining aspect ratio
@@ -237,13 +243,11 @@ def make_rescaled_image(video_width, video_height, image_name, outfolder):
     # Calculate new dimensions
     new_width = int(image_width * scale_ratio)
     new_height = int(image_height * scale_ratio)
-#    print(new_width/new_height)
-#    print(image_width/image_height)
-    output_filename = os.path.join(outfolder, os.path.basename(image_name))
     
     if input_type == "image":
         cmd = [
             'ffmpeg',
+            '-y',  # Add this flag to overwrite output file
             '-i', f'{image_name}',
             '-vf', f'scale={new_width}:{new_height}',
             output_filename
@@ -251,16 +255,16 @@ def make_rescaled_image(video_width, video_height, image_name, outfolder):
     
         print("FFmpeg command:", ' '.join(cmd))
     
-    # Run the FFmpeg command
+        # Run the FFmpeg command
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    ###
+    
     elif input_type == "video":
         pad_x = (video_width - new_width) // 2
         pad_y = (video_height - new_height) // 2
         
-#        print(f"Padding: X={pad_x}, Y={pad_y}")
         cmd = [
             'ffmpeg',
+            '-y',  # Add this flag to overwrite output file
             '-i', image_name,
             '-vf', f"scale={new_width}:{new_height},pad={video_width}:{video_height}:{pad_x}:{pad_y}:black",
             '-c:v', 'libx264',      # use H.264 for better control
@@ -299,6 +303,7 @@ def make_rescaled_image(video_width, video_height, image_name, outfolder):
        if result.stderr:
           print(f"FFmpeg error: {result.stderr}")
     return output_filename
+
 
 def separate_audio_video(input_video_path, outfolder,volume_factor):
     """
@@ -589,13 +594,13 @@ def overlay_multiple_images_to_video(video_path, out_video_name, overlay_list, f
         return False
 
 def parse_time(t):
-    """
-    Convert time input into seconds (float).
-    Accepts:
-      - number (int, float, or str like "35") → seconds
-      - "mm:ss" or "mm:ss.xxx"
-      - "hh:mm:ss" or "hh:mm:ss.xxx"
-    """
+#    Convert time input into seconds (float).
+#    Accepts:
+#      - number (int, float, or str like "35") → seconds
+#      - "mm:ss" or "mm:ss.xxx"
+#      - "hh:mm:ss" or "hh:mm:ss.xxx"
+#    Fractional seconds (milliseconds) are supported.
+
     if isinstance(t, (int, float)):
         return float(t)
 
@@ -614,6 +619,7 @@ def parse_time(t):
             raise ValueError(f"Invalid time format: {t}")
 
     raise ValueError(f"Unsupported time format: {t}")
+
 
 def apply_mosaics(input_video, output_video, mosaic_list):
     """
@@ -669,10 +675,19 @@ def apply_mosaics(input_video, output_video, mosaic_list):
     subprocess.run(cmd)
 
 
-def srt_to_ass(srt_file, ass_file, fontname="Arial", fontsize=36):
+def srt_to_ass(srt_file, ass_file, video_width, video_height, fontname="Arial", fontsize=36):
+    # Your code here:
     """
     Convert an SRT file to ASS format.
     Supports milliseconds with '.' (e.g., 00:00:01.234).
+    
+    Args:
+        srt_file (str): Path to input SRT file
+        ass_file (str): Path to output ASS file
+        fontname (str): Font name to use
+        fontsize (int): Font size
+        video_width (int): Video width for proper scaling
+        video_height (int): Video height for proper scaling
     """
     
     def convert_time(srt_time):
@@ -715,13 +730,13 @@ def srt_to_ass(srt_file, ass_file, fontname="Arial", fontsize=36):
                 event = f"Dialogue: 0,{start_ass},{end_ass},Default,,0,0,0,,{text}"
                 ass_events.append(event)
 
-    # ASS header
+    # ASS header with video resolution for proper scaling
     ass_header = f"""[Script Info]
 Title: {ass_file}
 ScriptType: v4.00+
 Collisions: Normal
-PlayResX: 1920
-PlayResY: 1080
+PlayResX: {video_width}
+PlayResY: {video_height}
 Timer: 100.0000
 
 [V4+ Styles]
@@ -739,7 +754,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             f.write(e + "\n")
 
     print(f"✅ Converted {srt_file} → {ass_file} successfully!")
-
     
 def add_numbered_grid(
     input_file,
@@ -790,7 +804,7 @@ def add_numbered_grid(
 
 
 
-def burn_subtitles(input_video, subtitle_file, output_video, font="Arial"):
+def burn_subtitles(input_video, subtitle_file, output_video, font="Arial", crf = 18,preset="veryfast",fontsdir=None):
     """
     Burn subtitles into a video using ffmpeg.
     
@@ -799,6 +813,7 @@ def burn_subtitles(input_video, subtitle_file, output_video, font="Arial"):
         subtitle_file (str): Path to subtitle file (.srt or .ass)
         output_video (str): Path to output video file
         font (str): Font to use if subtitle is .srt (default: Arial)
+        fontsdir (str): Path to directory containing fonts (optional)
     """
 
     if os.path.exists(output_video):
@@ -815,7 +830,42 @@ def burn_subtitles(input_video, subtitle_file, output_video, font="Arial"):
     if ext == ".srt":
         vf = f"subtitles={subtitle_file}:force_style='FontName={font}'"
     elif ext == ".ass":
-        vf = f"subtitles={subtitle_file}"
+        # Get video resolution to ensure proper scaling
+        probe_cmd = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "csv=p=0",
+            input_video
+        ]
+        dimensions = subprocess.run(probe_cmd, stdout=subprocess.PIPE, check=True).stdout
+        width, height = dimensions.decode().strip().split(',')
+        
+        # If fontsdir is not provided, try to find it automatically
+        if fontsdir is None:
+            try:
+                # Get all font files
+                font_files = fm.findSystemFonts()
+                
+                # Try to find a font that matches our desired font
+                for fpath in font_files:
+                    if font.lower() in os.path.basename(fpath).lower():
+                        fontsdir = os.path.dirname(fpath)
+                        print(f"Found font directory: {fontsdir}")
+                        break
+                
+                # If still not found, use the directory of the first font
+                if fontsdir is None and font_files:
+                    fontsdir = os.path.dirname(font_files[0])
+                    print(f"Using default font directory: {fontsdir}")
+            except Exception as e:
+                print(f"Warning: Could not automatically find font directory: {e}")
+        
+        # Use the video resolution for proper scaling
+        if fontsdir:
+            vf = f"subtitles={subtitle_file}:force_style='FontName={font},PlayResX={width},PlayResY={height}':fontsdir={fontsdir}"
+        else:
+            vf = f"subtitles={subtitle_file}:force_style='FontName={font},PlayResX={width},PlayResY={height}'"
     else:
         raise ValueError("Subtitle file must be .srt or .ass")
 
@@ -824,8 +874,8 @@ def burn_subtitles(input_video, subtitle_file, output_video, font="Arial"):
         "-i", input_video,
         "-vf", vf,
         "-c:v", "libx264",
-        "-crf", "18",           # high quality (lower = better)
-        "-preset", "fast",      # encoding speed/efficiency tradeoff
+        "-crf", str(crf),           # high quality (lower = better)
+        "-preset", preset,      # encoding speed/efficiency tradeoff
         "-c:a", "copy",         # copy audio without re-encoding
         output_video
     ]
@@ -833,6 +883,7 @@ def burn_subtitles(input_video, subtitle_file, output_video, font="Arial"):
     print("Running:", " ".join(cmd))
     subprocess.run(cmd, check=True)
     print(f"✅ Subtitles burned into {output_video}")
+
 
 
 def _time_to_td(t):
@@ -928,13 +979,13 @@ def end_credits_ass(template_file, txt_file, output_file,
     fallback = timedelta(seconds=fallback_duration_s)
 
     adjusted_events = []
-    fs90_lines = [ln for ln in events_tail if "{\\fs90" in ln]
-    other_lines = [ln for ln in events_tail if ln not in fs90_lines]
+    original_dialogue_lines = [ln for ln in events_tail if "Dialogue:" in ln]
+    other_lines = [ln for ln in events_tail if ln not in original_dialogue_lines]
 
     # Retime fs90 lines sequentially
-    if fs90_lines:
+    if original_dialogue_lines:
         st = last_credit_end + timedelta(seconds=1)
-        for i, ln in enumerate(fs90_lines):
+        for i, ln in enumerate(original_dialogue_lines):
             et = st + fallback
             parts = ln.split(",", 9)
             parts[1] = _td_to_time(st)
@@ -1053,3 +1104,627 @@ def create_ending_film(ass_file, song_file, output_file, width, height,
 
 
 
+def reencode_to_match(primary_video, list_to_reencode):
+    """
+    Re-encode a batch of videos to match the characteristics of the primary video.
+
+    Parameters:
+        primary_video (str): Path to the main/reference video.
+        list_to_reencode (list): List of [input_video, output_video] pairs.
+    """
+    if not os.path.exists(primary_video):
+        raise FileNotFoundError(f"Primary video not found: {primary_video}")
+
+    # Step 1: Get primary video parameters
+    def get_video_info(video_path):
+        cmd_v = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=codec_name,width,height,r_frame_rate,pix_fmt",
+            "-of", "json", video_path
+        ]
+        cmd_a = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "a:0",
+            "-show_entries", "stream=codec_name,sample_rate,channels,channel_layout",
+            "-of", "json", video_path
+        ]
+        v_info = json.loads(subprocess.run(cmd_v, capture_output=True, text=True).stdout)["streams"][0]
+        a_info = json.loads(subprocess.run(cmd_a, capture_output=True, text=True).stdout)["streams"][0]
+        return v_info, a_info
+
+    v_info, a_info = get_video_info(primary_video)
+
+    vcodec = v_info["codec_name"]
+    width = v_info["width"]
+    height = v_info["height"]
+    framerate = eval(v_info["r_frame_rate"])
+    pix_fmt = v_info["pix_fmt"]
+
+    acodec = a_info.get("codec_name", "aac")
+    sample_rate = int(a_info.get("sample_rate", 44100))
+    channels = int(a_info.get("channels", 2))
+
+    # Step 2: Re-encode each video in the list
+    for input_video, output_video in list_to_reencode:
+        if not os.path.exists(input_video):
+            print(f"❌ Input not found: {input_video}, skipping...")
+            continue
+
+        cmd_ffmpeg = [
+            "ffmpeg", "-y", "-i", input_video,
+            "-c:v", vcodec, "-pix_fmt", pix_fmt, "-r", str(framerate),
+            "-s", f"{width}x{height}",
+            "-c:a", acodec, "-ar", str(sample_rate), "-ac", str(channels),
+            output_video
+        ]
+        print(f"⚡ Re-encoding {input_video} → {output_video}")
+        subprocess.run(cmd_ffmpeg, check=True)
+        print(f"✅ Saved: {output_video}")
+
+
+def combine_videos(video_list, output_file="output.mp4", crf=18, preset="veryfast"):
+    """
+    Combine multiple videos into one using ffmpeg.
+
+    Parameters:
+        video_list (list): List of video file paths.
+        output_file (str): Name of the output video file.
+        crf (int): Quality parameter (lower = better quality, larger file).
+                   Recommended range: 18-28
+    """
+
+    # ✅ Step 1: Create input.txt
+    with open("input.txt", "w", encoding="utf-8") as f:
+        for video in video_list:
+            f.write(f"file '{video}'\n")
+
+    # ✅ Step 2: Run ffmpeg
+    cmd = [
+        "ffmpeg",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", "input.txt",
+        "-c:v", "libx264",
+        "-crf", str(crf),
+        "-preset", preset,
+        "-c:a", "aac",
+        "-b:a", "192k",
+        output_file
+    ]
+
+    print("Running:", " ".join(cmd))
+    subprocess.run(cmd, check=True)
+
+    # ✅ Step 3: Cleanup input.txt (optional)
+    os.remove("input.txt")
+    print(f"✅ Combined video saved as {output_file}")
+
+
+def mp3_to_wav(mp3_file):
+    """
+    Convert an MP3 file to WAV with the same name (different suffix).
+    Example: input.mp3 -> input.wav
+    """
+    wav_file = os.path.splitext(mp3_file)[0] + ".wav"
+    cmd = ["ffmpeg", "-y", "-i", mp3_file, wav_file]
+    subprocess.run(cmd, check=True)
+    print(f"Converted: {mp3_file} -> {wav_file}")
+    return wav_file
+
+
+def adjust_wav_volume(wav_file, volume_factor):
+    """
+    Adjust the volume of a WAV file and save as new file.
+    Example: input.wav, factor=0.1 -> input_0.1.wav
+    """
+    if volume_factor <= 0:
+        raise ValueError("volume_factor must be > 0")
+
+    base, ext = os.path.splitext(wav_file)
+    # Clean factor string (avoid ugly 0.333333333)
+    factor_str = f"{volume_factor:.2f}".rstrip("0").rstrip(".")
+    output_file = f"{base}_{factor_str}{ext}"
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", wav_file,
+        "-filter:a", f"volume={volume_factor}",
+        output_file
+    ]
+    subprocess.run(cmd, check=True)
+    print(f"Volume adjusted: {wav_file} -> {output_file}")
+    return output_file
+
+
+def split_video(input_file, sections):
+    """
+    Split a video into multiple sections.
+    
+    Parameters:
+        input_file (str): path to the video (e.g. "xxx.mov")
+        sections (list): list of time ranges, e.g. ["0:00-5:00", "5:00-8:00"]
+    """
+    base, ext = os.path.splitext(input_file)
+    
+    for section in sections:
+        start, end = section.split("-")
+        start = start.strip()
+        end = end.strip()
+
+        # Convert times like "5:00" into plain numbers for filename
+        def time_to_num(t):
+            parts = t.split(":")
+            if len(parts) == 2:  # mm:ss
+                return f"{int(parts[0]):02d}{int(parts[1]):02d}"
+            elif len(parts) == 3:  # hh:mm:ss
+                return f"{int(parts[0]):02d}{int(parts[1]):02d}{int(parts[2]):02d}"
+            else:
+                return t.replace(":", "")
+
+        start_num = time_to_num(start)
+        end_num = time_to_num(end)
+
+        output_file = f"{base}_{start_num}-{end_num}{ext}"
+
+        cmd = [
+            "ffmpeg", "-y",  # overwrite output
+            "-i", input_file,
+            "-ss", start,
+            "-to", end,
+            "-c", "copy",  # fast split, no re-encode
+            output_file
+        ]
+
+        print("Running:", " ".join(cmd))
+        subprocess.run(cmd, check=True)
+        print(f"Created: {output_file}")
+
+def create_black_still(
+    main_video,
+    text,
+    start_time,
+    end_time,
+    output_file="black_still.mp4",
+    font_name="Arial",
+    font_size=72,
+    font_color="&H00FFFFFF"
+):
+    """
+    Create a black still video with centered text using start and end time.
+    Duration = end_time - start_time
+    """
+    # Get main video resolution and framerate
+    cmd_probe = [
+        "ffprobe", "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height,r_frame_rate",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        main_video
+    ]
+    output = subprocess.check_output(cmd_probe).decode().splitlines()
+    width, height, framerate = output
+    fps = eval(framerate)
+
+    # Calculate duration
+    duration = parse_time(end_time) - parse_time(start_time)
+    if duration <= 0:
+        raise ValueError("End time must be after start time")
+
+    # Temporary files
+    ass_file = "temp_sub.ass"
+    black_file = "temp_black.mp4"
+
+    # Create ASS subtitle
+    ass_content = f"""
+[Script Info]
+ScriptType: v4.00+
+Collisions: Normal
+PlayResX: {width}
+PlayResY: {height}
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,{font_name},{font_size},{font_color},&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,5,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.00,0:00:{duration:.2f},Default,,0,0,0,,{text}
+"""
+    with open(ass_file, "w", encoding="utf-8") as f:
+        f.write(ass_content.strip())
+
+    # Create black video
+    cmd_black = [
+        "ffmpeg", "-y",
+        "-f", "lavfi",
+        "-i", f"color=c=black:s={width}x{height}:r={fps}:d={duration}",
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        black_file
+    ]
+    subprocess.run(cmd_black, check=True)
+
+    # Burn subtitle
+    cmd_burn = [
+        "ffmpeg", "-y",
+        "-i", black_file,
+        "-vf", f"ass={ass_file}",
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "copy",
+        output_file
+    ]
+    subprocess.run(cmd_burn, check=True)
+
+    # Cleanup
+    os.remove(ass_file)
+    os.remove(black_file)
+
+    print(f"Created black still with subtitles: {output_file}")
+    return output_file
+
+
+def overlay_black_still_on_video(
+    input_video,
+    black_file,
+    start_time,
+    end_time,
+    output_file="output.mov",
+    crf=18,
+    preset="fast"
+):
+    """
+    Overlay black_file on input_video from start_time to end_time.
+    Scales overlay to match input video dimensions.
+    """
+    start_sec = parse_time(start_time)
+    end_sec = parse_time(end_time)
+
+    if end_sec <= start_sec:
+        raise ValueError("end_time must be after start_time")
+
+    # Get input video dimensions
+    probe_cmd = [
+        "ffprobe", "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-of", "csv=p=0",
+        input_video
+    ]
+    dimensions = subprocess.run(probe_cmd, stdout=subprocess.PIPE, check=True).stdout
+    width, height = dimensions.decode().strip().split(',')
+
+    # FFmpeg overlay with scaling
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", input_video,
+        "-i", black_file,
+        "-filter_complex",
+        f"[1:v]scale={width}:{height}[scaled];"  # Scale overlay to match input
+        f"[0:v][scaled]overlay=enable='between(t,{start_sec},{end_sec})'",
+        "-c:v", "libx264",
+        "-crf", str(crf),
+        "-preset", preset,
+        "-c:a", "copy",
+        output_file
+    ]
+
+    subprocess.run(cmd, check=True)
+    print(f"Overlay complete. Output saved to {output_file}")
+    return output_file
+    
+
+def overlay_videos(main_video_path, overlay_video_path, output_path,
+                  main_start_time, overlay_start_time, overlay_end_time="the end",
+                  crf=23, preset="fast", overlay_position="10:10"):
+    """
+    Overlay a video on top of a main video with automatic re-encoding and rescaling.
+    
+    Args:
+        main_video_path (str): Path to the main video file
+        overlay_video_path (str): Path to the overlay video file
+        output_path (str): Path for the output video file
+        main_start_time (str/float): Start time in main video where overlay should appear
+        overlay_start_time (str/float): Start time in overlay video to use
+        overlay_end_time (str/float): End time in overlay video to use or "the end"
+        crf (int): Constant Rate Factor for quality (0-51, lower is better quality)
+        preset (str): Encoding preset (ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow)
+        overlay_position (str): Position of the overlay video (format: X:Y)
+    """
+    
+    # Get main video dimensions
+    main_width, main_height = get_media_dimensions(main_video_path)
+    if main_width is None or main_height is None:
+        print("Failed to get main video dimensions")
+        return False
+    
+    # Parse time inputs using your function
+    main_start_seconds = parse_time(main_start_time)
+    overlay_start_seconds = parse_time(overlay_start_time)
+    
+    if overlay_end_time != "the end":
+        overlay_end_seconds = parse_time(overlay_end_time)
+        enable_condition = f"between(t,{overlay_start_seconds},{overlay_end_seconds})"
+    else:
+        enable_condition = f"gte(t,{overlay_start_seconds})"
+    
+    # Build the FFmpeg command
+    cmd = [
+        "ffmpeg",
+        "-i", main_video_path,
+        "-i", overlay_video_path,
+        "-filter_complex",
+    ]
+    
+    # Create filtergraph for scaling and overlay
+    filter_graph = (
+        f"[1:v]scale=iw*min({main_width}/iw\\,{main_height}/ih):"
+        f"ih*min({main_width}/iw\\,{main_height}/ih):force_original_aspect_ratio=decrease,"
+        f"pad={main_width}:{main_height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+        f"setpts=PTS-STARTPTS+{main_start_seconds}/TB[scaled_overlay];"
+        f"[0:v][scaled_overlay]overlay={overlay_position}:enable='{enable_condition}'[v]"
+    )
+    
+    cmd.append(filter_graph)
+    
+    # Add output options with customizable CRF and preset
+    cmd.extend([
+        "-map", "[v]",           # Use the filtered video
+        "-map", "0:a?",          # Use audio from main video (if exists)
+        "-c:v", "libx264",       # Use H.264 video codec
+        "-preset", preset,       # Encoding preset
+        "-crf", str(crf),        # Quality setting
+        "-c:a", "aac",           # Use AAC audio codec
+        "-movflags", "+faststart", # Enable fast start for web playback
+        "-y",                    # Overwrite output file without asking
+        output_path
+    ])
+    
+    # Print the command for debugging
+    print("Running command:", " ".join(cmd))
+    
+    try:
+        # Run the FFmpeg command
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        print("Video overlay completed successfully!")
+        print(f"Used CRF: {crf}, Preset: {preset}")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"Error occurred: {e.stderr}")
+        return False
+    except FileNotFoundError:
+        print("FFmpeg not found. Please install FFmpeg and ensure it's in your PATH.")
+        return False
+
+
+def run_cmd(cmd, output_file=None):
+    # Show the command before running
+    print("\n>>> Running FFmpeg:")
+    print(" ".join(cmd), "\n")
+    subprocess.run(cmd, check=True)
+
+    # Check output file exists
+    if output_file:
+        if not os.path.exists(output_file) or os.path.getsize(output_file) == 0:
+            raise RuntimeError(f"❌ Failed: {output_file} was not created.")
+        else:
+            print(f"✅ Created: {output_file}")
+            
+import os
+
+def overlay_video(video1_path, video2_path, overlay_start_main, overlay_end_main, extract_start_video1, output_filename,crf=18,preset="fast"):
+    """
+    Create a video overlay with extraction and rescaling
+    
+    Args:
+        video1_path: Path to the overlay video
+        video2_path: Path to the main video
+        overlay_start_main: Start time for overlay in the main video (format: hh:mm:ss or seconds)
+        overlay_end_main: End time for overlay in the main video (format: hh:mm:ss or seconds)
+        extract_start_video1: Start time for extraction from overlay video (format: hh:mm:ss or seconds)
+        output_filename: Output filename for the final video
+    """
+    if os.path.exists(output_filename):
+        choice = input(f'"{output_filename}" already exists. Delete it? (y/n): ')
+        if choice.lower() == "y":
+            os.remove(output_filename)
+            print(f'Deleted existing "{output_filename}".')
+        else:
+            print("Aborted.")
+            return
+    # Parse time inputs
+    start_time_main = parse_time(overlay_start_main)
+    end_time_main = parse_time(overlay_end_main)
+    duration = end_time_main - start_time_main
+    extract_start = parse_time(extract_start_video1)
+    
+    # Create temporary directory for intermediate files
+    temp_dir = tempfile.mkdtemp()
+    
+    try:
+        # Step 1: Extract clip from overlay video
+        temp_extract = os.path.join(temp_dir, "extracted_clip.mp4")
+        cmd_extract = [
+            'ffmpeg',
+            '-ss', str(extract_start),
+            '-i', video1_path,
+            '-t', str(duration),
+            '-c', 'copy',
+            '-y',
+            temp_extract
+        ]
+        
+        print("Extracting clip from overlay video...")
+        print("FFmpeg command:", " ".join(cmd_extract))
+        subprocess.run(cmd_extract, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        
+        # Step 2: Remove audio and rescale
+        temp_muted = os.path.join(temp_dir, "muted_clip.mp4")
+        cmd_mute = [
+            'ffmpeg',
+            '-i', temp_extract,
+            '-an',
+            '-y',
+            temp_muted
+        ]
+        
+        print("Removing audio from extracted clip...")
+        print("FFmpeg command:", " ".join(cmd_mute))
+        subprocess.run(cmd_mute, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        
+        # Get dimensions of main video
+        main_width, main_height = get_media_dimensions(video2_path)
+        
+        # Rescale the muted clip
+        temp_rescaled = os.path.join(temp_dir, "rescaled_clip.mp4")
+        print("Rescaling the muted clip...")
+        make_rescaled_image(main_width, main_height, temp_muted, temp_rescaled)
+        
+        # Step 3: Create final overlay
+        cmd_final = [
+            'ffmpeg',
+            '-i', video2_path,
+            '-i', temp_rescaled,
+            '-filter_complex',
+            f"[1:v]setpts=PTS+{start_time_main}/TB[v1];[0:v][v1]overlay=0:0:enable='between(t,{start_time_main},{end_time_main})'",
+            '-c:a', 'copy',
+            '-c:v', 'libx264',
+            '-crf', str(crf),
+            '-preset', preset,
+            '-y',
+            output_filename
+        ]
+        
+        print("Creating final overlay...")
+        print("FFmpeg command:", " ".join(cmd_final))
+        subprocess.run(cmd_final, check=True)
+        print(f"Final video saved as {output_filename}")
+        
+    except subprocess.CalledProcessError as e:
+        print(f"Error during processing: {e}")
+    finally:
+        # Clean up temporary files
+        for file in [temp_extract, temp_muted, temp_rescaled]:
+            if os.path.exists(file):
+                os.remove(file)
+        os.rmdir(temp_dir)
+
+    
+
+
+def overlay_video_split_and_combine(
+    main_video,
+    overlay_video,
+    overlay_start,        # e.g. "1:01"
+    overlay_duration,     # e.g. "30"
+    main_insert_at,       # e.g. "5:00"
+    output_file="output.mp4",
+    crf=20,
+    preset="veryfast",
+    keep_intermediates=False
+):
+    """
+    Replace a section of the main video with an overlay, but keep the original main audio.
+    """
+
+    # ---- parse times ----
+    o_start = parse_time(overlay_start)
+    o_dur   = parse_time(overlay_duration)
+    m_at    = parse_time(main_insert_at)
+    if o_dur <= 0:
+        raise ValueError("overlay_duration must be > 0")
+
+    # Intermediate files
+    trimmed_overlay     = "tmp_overlay_trimmed.mp4"
+    main_audio          = "tmp_overlay_audio.wav"
+    overlay_with_audio  = "tmp_overlay_with_audio.mp4"
+    part1               = "tmp_main_part1.mp4"
+    part2               = "tmp_main_part2.mp4"
+
+    skip = m_at + o_dur
+
+    # ---- Prepare all 6 commands ----
+    cmd1 = [
+        "ffmpeg", "-y",
+        "-i", overlay_video,
+        "-ss", f"{o_start:.3f}",
+        "-t",  f"{o_dur:.3f}",
+        "-an",  # drop any audio from overlay
+        "-c:v", "libx264", "-crf", str(crf), "-preset", preset, "-pix_fmt", "yuv420p",
+        trimmed_overlay
+    ]
+
+    cmd2 = [
+        "ffmpeg", "-y",
+        "-i", main_video,
+        "-ss", f"{m_at:.3f}",
+        "-t",  f"{o_dur:.3f}",
+        "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2",
+        main_audio
+    ]
+
+    cmd3 = [
+        "ffmpeg", "-y",
+        "-i", trimmed_overlay,
+        "-i", main_audio,
+        "-c:v", "copy",
+        "-c:a", "pcm_s16le",
+        overlay_with_audio
+    ]
+
+    cmd4 = [
+        "ffmpeg", "-y",
+        "-i", main_video,
+        "-t", f"{m_at:.3f}",
+        "-c:v", "libx264", "-crf", str(crf), "-preset", preset, "-pix_fmt", "yuv420p",
+        "-c:a", "pcm_s16le",
+        part1
+    ]
+
+    cmd5 = [
+        "ffmpeg", "-y",
+        "-i", main_video,
+        "-ss", f"{skip:.3f}",
+        "-c:v", "libx264", "-crf", str(crf), "-preset", preset, "-pix_fmt", "yuv420p",
+        "-c:a", "pcm_s16le",
+        part2
+    ]
+
+    cmd6 = [
+        "ffmpeg", "-y",
+        "-i", part1,
+        "-i", overlay_with_audio,
+        "-i", part2,
+        "-filter_complex", "[0:v][0:a][1:v][1:a][2:v][2:a]concat=n=3:v=1:a=1[v][a]",
+        "-map", "[v]", "-map", "[a]",
+        "-c:v", "libx264", "-crf", str(crf), "-preset", preset, "-pix_fmt", "yuv420p",
+        "-c:a", "pcm_s16le",
+        "-movflags", "+faststart",
+        output_file
+    ]
+
+    # ---- Print all commands at the beginning ----
+    print("\n=========== ALL FFMPEG COMMANDS ===========")
+    for c in [cmd1, cmd2, cmd3, cmd4, cmd5, cmd6]:
+        print(" ".join(c))
+    print("==========================================\n")
+
+    # ---- Execute commands ----
+    run_cmd(cmd1, trimmed_overlay)
+    run_cmd(cmd2, main_audio)
+    run_cmd(cmd3, overlay_with_audio)
+    run_cmd(cmd4, part1)
+    run_cmd(cmd5, part2)
+    run_cmd(cmd6, output_file)
+
+    # ---- cleanup ----
+    if not keep_intermediates:
+        for f in (part1, part2, trimmed_overlay, main_audio, overlay_with_audio):
+            try:
+                os.remove(f)
+            except FileNotFoundError:
+                pass
+
+    print(f"🎉 Done: {output_file}")
