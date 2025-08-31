@@ -207,6 +207,51 @@ def get_media_dimensions(file_path):
         raise Exception(f"FFprobe error: {result.stderr}")
 
 
+def get_video_length(input_file):
+    """
+    Get the length of a video in a formatted string:
+      - hh:mm:ss.milliseconds if >= 1 hour
+      - mm:ss.milliseconds if >= 1 minute and < 1 hour
+      - 0:ss.milliseconds if < 1 minute
+    """
+
+    # ✅ Check if file exists
+    if not os.path.isfile(input_file):
+        return f"Error: file '{input_file}' does not exist."
+
+    # Run ffprobe to get video duration
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            input_file
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+    
+    try:
+        duration = float(result.stdout.strip())
+    except ValueError:
+        return f"Error: cannot determine video length for '{input_file}'."
+    
+    hours = int(duration // 3600)
+    minutes = int((duration % 3600) // 60)
+    seconds = int(duration % 60)
+    milliseconds = int((duration - int(duration)) * 1000)
+
+    if hours > 0:
+        return f"{hours:02}:{minutes:02}:{seconds:02}.{milliseconds:03}"
+    elif minutes > 0:
+        return f"{minutes:02}:{seconds:02}.{milliseconds:03}"
+    else:
+        return f"0:{seconds:02}.{milliseconds:03}"
+
+
+
+
 def check_file_type(filename):
     """Check if a file is an image or video based on its extension"""
     path = Path(filename)
@@ -417,181 +462,6 @@ def preprocess(main_video,input_data,outfolder,volume_factor=0):
         if newfile_type == "video":
            success, muted_video, audio_file = separate_audio_video(newfile,outfolder,volume_factor)
 
-
-def overlay_image_to_video(video_path, image_path, start_time=5, end_time=10):
-    # Get video dimensions
-    def get_video_dimensions(file_path):
-        cmd = [
-            'ffprobe',
-            '-v', 'error',
-            '-select_streams', 'v:0',
-            '-show_entries', 'stream=width,height',
-            '-of', 'csv=s=x:p=0',
-            file_path
-        ]
-        
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        
-        if result.returncode == 0:
-            dimensions = result.stdout.strip()
-            width, height = map(int, dimensions.split('x'))
-            return width, height
-        else:
-            raise Exception(f"FFprobe error: {result.stderr}")
-
-def overlay_multiple_images_to_video(video_path, out_video_name, overlay_list, fadein=0, fadeout=0):
-    """
-    Overlay multiple images to a video with specified time ranges
-    
-    Parameters:
-    video_path: path to the video file
-    overlay_list: list of tuples in format [(image_path, start_time, end_time), ...]
-    """
-    
-    try:
-        # Get video dimensions
-        video_cmd = [
-            'ffprobe',
-            '-v', 'error',
-            '-select_streams', 'v:0',
-            '-show_entries', 'stream=width,height',
-            '-of', 'csv=s=x:p=0',
-            video_path
-        ]
-        
-        video_result = subprocess.run(video_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        
-        if video_result.returncode != 0:
-            raise Exception(f"FFprobe error for video: {video_result.stderr}")
-            
-        video_dimensions = video_result.stdout.strip()
-        video_width, video_height = map(int, video_dimensions.split('x'))
-        print(f"Video dimensions: {video_width}x{video_height}")
-        
-        # Build the filter complex string
-        filter_complex_parts = []
-        overlay_parts = []
-        
-        for i, (image_path, start_time, end_time) in enumerate(overlay_list):
-            # Get image dimensions
-            image_cmd = [
-                'ffprobe',
-                '-v', 'error',
-                '-f', 'image2',
-                '-show_entries', 'stream=width,height',
-                '-of', 'csv=s=x:p=0',
-                image_path
-            ]
-            
-            image_result = subprocess.run(image_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            
-            if image_result.returncode != 0:
-                print(f"Warning: Could not get dimensions for {image_path}, skipping")
-                continue
-                
-            image_dimensions = image_result.stdout.strip()
-            img_width, img_height = map(int, image_dimensions.split('x'))
-            print(f"Image {i+1} dimensions: {img_width}x{img_height}")
-            
-            # Calculate scaling factors
-            width_ratio = video_width / img_width
-            height_ratio = video_height / img_height
-            scale_ratio = min(width_ratio, height_ratio)
-            
-            # Calculate new dimensions
-            new_width = int(img_width * scale_ratio)
-            new_height = int(img_height * scale_ratio)
-            
-            # Calculate padding to center the image
-            pad_x = (video_width - new_width) // 2
-            pad_y = (video_height - new_height) // 2
-            
-            print(f"Image {i+1} scaled to: {new_width}x{new_height}")
-            print(f"Image {i+1} padding: X={pad_x}, Y={pad_y}")
-            
-            # Add to filter complex
-            filter_complex_parts.append(
-                f"[{i+1}:v]scale={new_width}:{new_height},"
-                f"pad={video_width}:{video_height}:{pad_x}:{pad_y}:black[img{i+1}];"
-            )
-            
-            # Add overlay part
-            if i == 0:
-                # First overlay uses the original video
-                overlay_parts.append(
-                    f"[0:v][img{i+1}]overlay=enable='between(t,{start_time},{end_time})'"
-                )
-            else:
-                # Subsequent overlays use the previous result
-                overlay_parts[-1] = f"{overlay_parts[-1]}[v{i}];"
-                overlay_parts.append(
-                    f"[v{i}][img{i+1}]overlay=enable='between(t,{start_time},{end_time})'"
-                )
-        
-        # Check if we have any valid images to process
-        if not filter_complex_parts:
-            print("No valid images to process")
-            return False
-        
-        # Combine all filter parts
-        filter_complex = "".join(filter_complex_parts) + "".join(overlay_parts)
-        
-        # Build input list
-        input_args = ['-i', video_path]
-        for image_path, _, _ in overlay_list:
-            input_args.extend(['-i', image_path])
-        
-        # Build FFmpeg command
-        cmd = [
-            'ffmpeg',
-            *input_args,
-            '-filter_complex', filter_complex,
-            '-c:v', 'libx264',
-            '-preset', 'fast',
-            '-crf', '18',
-            '-c:a', 'copy',
-            out_video_name
-        ]
-        
-#        print("FFmpeg command:", ' '.join(cmd))
-
-        print("FFmpeg command:", ' '.join(shlex.quote(arg) for arg in cmd))
-
-        
-        # Run the FFmpeg command with real-time output
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,  # Redirect stderr to stdout
-            universal_newlines=True,
-            bufsize=1
-        )
-        
-        # Print output in real-time
-        for line in process.stdout:
-            print(line, end='')
-            sys.stdout.flush()  # Ensure immediate output
-        
-        # Wait for the process to complete
-        process.wait()
-        
-        if process.returncode == 0:
-            print("All overlays completed successfully!")
-            
-            # Check if output file was created
-            if os.path.exists(out_video_name):
-                print(f"Output file {out_video_name} was successfully created")
-                return True
-            else:
-                print("Error: Output file was not created")
-                return False
-        else:
-            print(f"FFmpeg error: process returned {process.returncode}")
-            return False
-            
-    except Exception as e:
-        print(f"Error: {e}")
-        return False
 
 def parse_time(t):
 #    Convert time input into seconds (float).
@@ -1416,87 +1286,6 @@ def overlay_black_still_on_video(
     return output_file
     
 
-def overlay_videos(main_video_path, overlay_video_path, output_path,
-                  main_start_time, overlay_start_time, overlay_end_time="the end",
-                  crf=23, preset="fast", overlay_position="10:10"):
-    """
-    Overlay a video on top of a main video with automatic re-encoding and rescaling.
-    
-    Args:
-        main_video_path (str): Path to the main video file
-        overlay_video_path (str): Path to the overlay video file
-        output_path (str): Path for the output video file
-        main_start_time (str/float): Start time in main video where overlay should appear
-        overlay_start_time (str/float): Start time in overlay video to use
-        overlay_end_time (str/float): End time in overlay video to use or "the end"
-        crf (int): Constant Rate Factor for quality (0-51, lower is better quality)
-        preset (str): Encoding preset (ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow)
-        overlay_position (str): Position of the overlay video (format: X:Y)
-    """
-    
-    # Get main video dimensions
-    main_width, main_height = get_media_dimensions(main_video_path)
-    if main_width is None or main_height is None:
-        print("Failed to get main video dimensions")
-        return False
-    
-    # Parse time inputs using your function
-    main_start_seconds = parse_time(main_start_time)
-    overlay_start_seconds = parse_time(overlay_start_time)
-    
-    if overlay_end_time != "the end":
-        overlay_end_seconds = parse_time(overlay_end_time)
-        enable_condition = f"between(t,{overlay_start_seconds},{overlay_end_seconds})"
-    else:
-        enable_condition = f"gte(t,{overlay_start_seconds})"
-    
-    # Build the FFmpeg command
-    cmd = [
-        "ffmpeg",
-        "-i", main_video_path,
-        "-i", overlay_video_path,
-        "-filter_complex",
-    ]
-    
-    # Create filtergraph for scaling and overlay
-    filter_graph = (
-        f"[1:v]scale=iw*min({main_width}/iw\\,{main_height}/ih):"
-        f"ih*min({main_width}/iw\\,{main_height}/ih):force_original_aspect_ratio=decrease,"
-        f"pad={main_width}:{main_height}:(ow-iw)/2:(oh-ih)/2:color=black,"
-        f"setpts=PTS-STARTPTS+{main_start_seconds}/TB[scaled_overlay];"
-        f"[0:v][scaled_overlay]overlay={overlay_position}:enable='{enable_condition}'[v]"
-    )
-    
-    cmd.append(filter_graph)
-    
-    # Add output options with customizable CRF and preset
-    cmd.extend([
-        "-map", "[v]",           # Use the filtered video
-        "-map", "0:a?",          # Use audio from main video (if exists)
-        "-c:v", "libx264",       # Use H.264 video codec
-        "-preset", preset,       # Encoding preset
-        "-crf", str(crf),        # Quality setting
-        "-c:a", "aac",           # Use AAC audio codec
-        "-movflags", "+faststart", # Enable fast start for web playback
-        "-y",                    # Overwrite output file without asking
-        output_path
-    ])
-    
-    # Print the command for debugging
-    print("Running command:", " ".join(cmd))
-    
-    try:
-        # Run the FFmpeg command
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        print("Video overlay completed successfully!")
-        print(f"Used CRF: {crf}, Preset: {preset}")
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"Error occurred: {e.stderr}")
-        return False
-    except FileNotFoundError:
-        print("FFmpeg not found. Please install FFmpeg and ensure it's in your PATH.")
-        return False
 
 
 def run_cmd(cmd, output_file=None):
@@ -1512,8 +1301,7 @@ def run_cmd(cmd, output_file=None):
         else:
             print(f"✅ Created: {output_file}")
             
-import os
-
+            
 def overlay_video(video1_path, video2_path, overlay_start_main, overlay_end_main, extract_start_video1, output_filename,crf=18,preset="fast"):
     """
     Create a video overlay with extraction and rescaling
@@ -1538,6 +1326,7 @@ def overlay_video(video1_path, video2_path, overlay_start_main, overlay_end_main
     start_time_main = parse_time(overlay_start_main)
     end_time_main = parse_time(overlay_end_main)
     duration = end_time_main - start_time_main
+    print("duration:",duration)
     extract_start = parse_time(extract_start_video1)
     
     # Create temporary directory for intermediate files
@@ -1728,3 +1517,122 @@ def overlay_video_split_and_combine(
                 pass
 
     print(f"🎉 Done: {output_file}")
+
+def overlay_video2(video1_path, video2_path, overlay_start_main, overlay_end_main, extract_start_video1, output_filename, crf=18, preset="fast", fadeout=0):
+    """
+    Create a video overlay with extraction and rescaling
+    
+    Args:
+        video1_path: Path to the overlay video
+        video2_path: Path to the main video
+        overlay_start_main: Start time for overlay in the main video (format: hh:mm:ss or seconds)
+        overlay_end_main: End time for overlay in the main video (format: hh:mm:ss or seconds)
+        extract_start_video1: Start time for extraction from overlay video (format: hh:mm:ss or seconds)
+        output_filename: Output filename for the final video
+        fadeout: Duration of fadeout effect in seconds (0 means no fadeout)
+    """
+    if os.path.exists(output_filename):
+        choice = input(f'"{output_filename}" already exists. Delete it? (y/n): ')
+        if choice.lower() == "y":
+            os.remove(output_filename)
+            print(f'Deleted existing "{output_filename}".')
+        else:
+            print("Aborted.")
+            return
+
+    # Parse time inputs
+    start_time_main = parse_time(overlay_start_main)
+    end_time_main = parse_time(overlay_end_main)
+    duration = end_time_main - start_time_main
+    extract_start = parse_time(extract_start_video1)
+    
+    # Create temporary directory for intermediate files
+    temp_dir = tempfile.mkdtemp()
+    
+    try:
+        # Determine extraction duration based on fadeout mode
+#        extract_duration = fadeout if fadeout != 0 else duration
+        extract_duration =  duration
+
+        # Step 1: Extract clip from overlay video
+        temp_extract = os.path.join(temp_dir, "extracted_clip.mp4")
+        cmd_extract = [
+            'ffmpeg',
+            '-ss', str(extract_start),
+            '-i', video1_path,
+            '-t', str(f'{extract_duration}'), #str(extract_duration)
+            '-c', 'copy',
+            '-y',
+            temp_extract
+        ]
+        
+        print("Extracting clip from overlay video...")
+        print("FFmpeg command:", " ".join(cmd_extract))
+        subprocess.run(cmd_extract, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        
+        # Step 2: Remove audio and rescale
+        temp_muted = os.path.join(temp_dir, "muted_clip.mp4")
+        cmd_mute = [
+            'ffmpeg',
+            '-i', temp_extract,
+            '-an',
+            '-y',
+            temp_muted
+        ]
+        
+        print("Removing audio from extracted clip...")
+        print("FFmpeg command:", " ".join(cmd_mute))
+        subprocess.run(cmd_mute, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        
+        # Get dimensions of main video
+        main_width, main_height = get_media_dimensions(video2_path)
+        
+        # Rescale the muted clip
+        temp_rescaled = os.path.join(temp_dir, "rescaled_clip.mp4")
+        print("Rescaling the muted clip...")
+        make_rescaled_image(main_width, main_height, temp_muted, temp_rescaled)
+        
+        # Step 3: Create final overlay with optional fadeout
+        if fadeout != 0:
+            # Fadeout mode
+           cmd_final =  f'''
+              ffmpeg -i {video2_path} -i {temp_rescaled} -filter_complex "
+              [0:v]trim=0:{start_time_main},setpts=PTS-STARTPTS[part1];
+              color=c=black:size={main_width}x{main_height}:d={duration}[black];
+              [1:v]trim={extract_start}:{extract_start+duration},setpts=PTS-STARTPTS,format=rgba,fade=t=out:st={duration-fadeout}:d={fadeout}:alpha=1[ov];
+              [black][ov]overlay=x=(main_w-overlay_w)/2:y=(main_h-overlay_h)/2:shortest=1[part2];
+              [0:v]trim={end_time_main},setpts=PTS-STARTPTS[part3];
+              [part1][part2][part3]concat=n=3:v=1:a=0[vout]
+              " -map "[vout]" -map 0:a -c:v libx264 -pix_fmt yuv420p -preset {preset} -crf {crf} -c:a copy -y "{output_filename}"
+              '''
+
+           subprocess.run(cmd_final, shell=True, check=True)
+        else:
+            # Original overlay mode
+            cmd_final = [
+                'ffmpeg',
+                '-i', video2_path,
+                '-i', temp_rescaled,
+                '-filter_complex',
+                f"[1:v]setpts=PTS+{start_time_main}/TB[v1];[0:v][v1]overlay=0:0:enable='between(t,{start_time_main},{end_time_main})'",
+                '-c:a', 'copy',
+                '-c:v', 'libx264',
+                '-crf', str(crf),
+                '-preset', preset,
+                '-y',
+                output_filename
+            ]
+        subprocess.run(cmd_final, check=True)
+        print("Creating final overlay...")
+        print("FFmpeg command:", " ".join(cmd_final))
+#        subprocess.run(cmd_final, check=True)
+        print(f"Final video saved as {output_filename}")
+        
+    except subprocess.CalledProcessError as e:
+        print(f"Error during processing: {e}")
+    finally:
+        # Clean up temporary files
+        for file in [temp_extract, temp_muted, temp_rescaled]:
+            if os.path.exists(file):
+                os.remove(file)
+        os.rmdir(temp_dir)
