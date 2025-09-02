@@ -11,7 +11,7 @@ from PIL import Image, ImageDraw, ImageFont
 from fractions import Fraction
 import matplotlib.font_manager as fm
 import tempfile
-
+import shutil
 
 
 
@@ -491,6 +491,80 @@ def parse_time(t):
     raise ValueError(f"Unsupported time format: {t}")
 
 
+def extract_frames(input_file, time_and_name_list, fast_seek=True):
+    """
+    Extract multiple frames from a video at specific times using FFmpeg
+    
+    Args:
+        input_file (str): Path to input video file
+        time_and_name_list (list): List of lists containing [time_input, output_filename] pairs
+        fast_seek (bool): Use fast seeking (before input) if True,
+                         precise seeking (after input) if False
+    Returns:
+        list: List of results for each extraction attempt
+    """
+    # Check if input file exists
+    if not os.path.isfile(input_file):
+        raise FileNotFoundError(f"Input file '{input_file}' not found")
+    
+    results = []
+    
+    for time_input, output_file in time_and_name_list:
+        try:
+            # Parse the time input to seconds
+            time_seconds = parse_time(time_input)
+            
+            # Convert seconds to HH:MM:SS.mmm format for FFmpeg
+            hours = int(time_seconds // 3600)
+            minutes = int((time_seconds % 3600) // 60)
+            seconds = time_seconds % 60
+            
+            # Format the time string for FFmpeg
+            time_str = f"{hours:02d}:{minutes:02d}:{seconds:06.3f}"
+            
+            # Build the FFmpeg command
+            cmd = ['ffmpeg']
+            
+            if fast_seek:
+                cmd.extend(['-ss', time_str])
+            
+            cmd.extend(['-i', input_file])
+            
+            if not fast_seek:
+                cmd.extend(['-ss', time_str])
+            
+            # Add output options based on file extension
+            if output_file.lower().endswith(('.jpg', '.jpeg')):
+                cmd.extend(['-q:v', '2'])  # JPEG quality (1-31, 1=best)
+            
+            cmd.extend(['-frames:v', '1', '-update', '1', output_file])
+            
+            # Run the command
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            results.append((time_input, output_file, True, "Success"))
+            print(f"Successfully extracted frame at {time_input} ({time_str}) to {output_file}")
+            
+        except ValueError as e:
+            error_msg = f"Invalid time format '{time_input}': {e}"
+            results.append((time_input, output_file, False, error_msg))
+            print(error_msg)
+        except subprocess.CalledProcessError as e:
+            error_msg = f"Error extracting frame at {time_input}: {e.stderr}"
+            results.append((time_input, output_file, False, error_msg))
+            print(error_msg)
+        except FileNotFoundError:
+            error_msg = "FFmpeg not found. Please install FFmpeg and ensure it's in your PATH"
+            results.append((time_input, output_file, False, error_msg))
+            print(error_msg)
+            break  # Stop processing if FFmpeg isn't found
+        except Exception as e:
+            error_msg = f"Unexpected error extracting frame at {time_input}: {e}"
+            results.append((time_input, output_file, False, error_msg))
+            print(error_msg)
+    
+    return results
+
+    
 def apply_mosaics(input_video, output_video, mosaic_list):
     """
     Apply mosaic (pixelation) effect to multiple regions of a video with optional timing.
@@ -1033,42 +1107,38 @@ def reencode_to_match(primary_video, list_to_reencode):
         print(f"✅ Saved: {output_video}")
 
 
-def combine_videos(video_list, output_file="output.mp4", crf=18, preset="veryfast"):
-    """
-    Combine multiple videos into one using ffmpeg.
-
-    Parameters:
-        video_list (list): List of video file paths.
-        output_file (str): Name of the output video file.
-        crf (int): Quality parameter (lower = better quality, larger file).
-                   Recommended range: 18-28
-    """
-
-    # ✅ Step 1: Create input.txt
-    with open("input.txt", "w", encoding="utf-8") as f:
+def combine_videos(video_list, output_file="test.mov", crf=40, preset="ultrafast"):
+    # Create temporary file for concat list
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+        # Write absolute paths to concat list
         for video in video_list:
-            f.write(f"file '{video}'\n")
+            f.write(f"file '{os.path.abspath(video)}'\n")
+        list_path = f.name
 
-    # ✅ Step 2: Run ffmpeg
-    cmd = [
-        "ffmpeg",
-        "-f", "concat",
-        "-safe", "0",
-        "-i", "input.txt",
-        "-c:v", "libx264",
-        "-crf", str(crf),
-        "-preset", preset,
-        "-c:a", "aac",
-        "-b:a", "192k",
-        output_file
-    ]
-
-    print("Running:", " ".join(cmd))
-    subprocess.run(cmd, check=True)
-
-    # ✅ Step 3: Cleanup input.txt (optional)
-    os.remove("input.txt")
-    print(f"✅ Combined video saved as {output_file}")
+    try:
+        # Build FFmpeg command
+        cmd = [
+            'ffmpeg',
+            '-f', 'concat',
+            '-safe', '0',
+            '-i', list_path,
+            '-c:v', 'libx264',
+            '-crf', str(crf),
+            '-preset', preset,
+            '-c:a', 'aac',
+            '-b:a', '128k',
+            '-movflags', '+faststart',
+            '-y',  # Overwrite output file if exists
+            output_file
+        ]
+        
+        # Run command
+        subprocess.run(cmd, check=True)
+        print(f"Successfully created {output_file}")
+    
+    finally:
+        # Clean up temporary file
+        os.unlink(list_path)
 
 
 def mp3_to_wav(mp3_file):
@@ -1107,48 +1177,100 @@ def adjust_wav_volume(wav_file, volume_factor):
     return output_file
 
 
-def split_video(input_file, sections):
+def split_video(input_file, sections, output_files=None, audio_codec="wav"):
     """
     Split a video into multiple sections.
+    If a section is marked 'black', generate a black screen with silent audio.
     
-    Parameters:
-        input_file (str): path to the video (e.g. "xxx.mov")
-        sections (list): list of time ranges, e.g. ["0:00-5:00", "5:00-8:00"]
+    Args:
+        input_file (str): Path to video.
+        sections (list[str]): ["start-end", ...] where times can be "mm:ss", "hh:mm:ss", or seconds.
+                              If 'black' is in the string, a filler section is generated.
+        output_files (list[str] | None): Optional list of output filenames (must match sections).
+        audio_codec (str): Audio codec for encoding ("wav" or "aac").
     """
+
+    # ---- Helper for filename default
+    def time_to_num(t: str) -> str:
+        parts = str(t).split(":")
+        try:
+            if len(parts) == 1:
+                return str(t).replace(".", "_")
+            if len(parts) == 2:
+                return f"{int(float(parts[0])):02d}{int(float(parts[1])):02d}"
+            if len(parts) == 3:
+                return f"{int(float(parts[0])):02d}{int(float(parts[1])):02d}{int(float(parts[2])):02d}"
+        except Exception:
+            pass
+        return str(t).replace(":", "_").replace(".", "_")
+
+    # ---- Get video resolution for black filler
+    width, height = get_media_dimensions(input_file)
+
+    # ---- Prepare output filenames
     base, ext = os.path.splitext(input_file)
-    
-    for section in sections:
-        start, end = section.split("-")
-        start = start.strip()
-        end = end.strip()
+    if output_files is None:
+        output_files = [f"{base}_{time_to_num(sec.split('-')[0])}-{time_to_num(sec.split('-')[1])}{ext}"
+                        for sec in sections]
 
-        # Convert times like "5:00" into plain numbers for filename
-        def time_to_num(t):
-            parts = t.split(":")
-            if len(parts) == 2:  # mm:ss
-                return f"{int(parts[0]):02d}{int(parts[1]):02d}"
-            elif len(parts) == 3:  # hh:mm:ss
-                return f"{int(parts[0]):02d}{int(parts[1]):02d}{int(parts[2]):02d}"
+    if len(output_files) != len(sections):
+        raise ValueError("output_files must match sections length")
+
+    for i, (section, output_file) in enumerate(zip(sections, output_files)):
+        if "-" not in section:
+            raise ValueError(f"Section must be 'start-end' format, got: {section}")
+
+        start_raw, end_raw = section.split("-", 1)
+        start_raw, end_raw = start_raw.strip(), end_raw.strip()
+
+        start_s = parse_time(start_raw)
+        end_s = parse_time(end_raw)
+        duration = end_s - start_s
+        if duration <= 0:
+            raise ValueError(f"Invalid section (end must be > start): {section}")
+
+        if "black" in section.lower():
+            # ---- Black filler with silent audio
+            if audio_codec == "wav":
+                audio_args = ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
+            elif audio_codec == "aac":
+                audio_args = ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
             else:
-                return t.replace(":", "")
+                raise ValueError(f"Unsupported audio codec: {audio_codec}")
 
-        start_num = time_to_num(start)
-        end_num = time_to_num(end)
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "lavfi", "-i", f"color=c=black:s={width}x{height}:d={duration}"
+            ] + audio_args + [
+                "-c:v", "libx264", "-preset", "fast",
+                "-shortest",
+                output_file
+            ]
+        else:
+            # ---- Extract actual video section
+            if audio_codec == "wav":
+                audio_args = ["-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2"]
+            elif audio_codec == "aac":
+                audio_args = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
+            else:
+                raise ValueError(f"Unsupported audio codec: {audio_codec}")
 
-        output_file = f"{base}_{start_num}-{end_num}{ext}"
-
-        cmd = [
-            "ffmpeg", "-y",  # overwrite output
-            "-i", input_file,
-            "-ss", start,
-            "-to", end,
-            "-c", "copy",  # fast split, no re-encode
-            output_file
-        ]
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", f"{start_s:.3f}",
+                "-i", input_file,
+                "-t", f"{duration:.3f}",
+                "-c:v", "libx264", "-preset", "fast"
+            ] + audio_args + [
+                "-movflags", "+faststart",
+                output_file
+            ]
 
         print("Running:", " ".join(cmd))
         subprocess.run(cmd, check=True)
-        print(f"Created: {output_file}")
+        print(f"✅ Created: {output_file}")
+    
+  
 
 def create_black_still(
     main_video,
@@ -1161,10 +1283,10 @@ def create_black_still(
     font_color="&H00FFFFFF"
 ):
     """
-    Create a black still video with centered text using start and end time.
+    Create a black still video with centered text and silent audio.
     Duration = end_time - start_time
     """
-    # Get main video resolution and framerate
+    # Get main video resolution, framerate, and audio info
     cmd_probe = [
         "ffprobe", "-v", "error",
         "-select_streams", "v:0",
@@ -1175,6 +1297,21 @@ def create_black_still(
     output = subprocess.check_output(cmd_probe).decode().splitlines()
     width, height, framerate = output
     fps = eval(framerate)
+
+    # Get main audio parameters
+    cmd_audio = [
+        "ffprobe", "-v", "error",
+        "-select_streams", "a:0",
+        "-show_entries", "stream=sample_rate,channels",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        main_video
+    ]
+    audio_output = subprocess.check_output(cmd_audio).decode().splitlines()
+    if len(audio_output) == 2:
+        sample_rate, channels = map(int, audio_output)
+    else:
+        # Default to 44100 Hz stereo if no audio stream
+        sample_rate, channels = 44100, 2
 
     # Calculate duration
     duration = parse_time(end_time) - parse_time(start_time)
@@ -1204,13 +1341,17 @@ Dialogue: 0,0:00:00.00,0:00:{duration:.2f},Default,,0,0,0,,{text}
     with open(ass_file, "w", encoding="utf-8") as f:
         f.write(ass_content.strip())
 
-    # Create black video
+    # Create black video with silent audio
     cmd_black = [
         "ffmpeg", "-y",
         "-f", "lavfi",
         "-i", f"color=c=black:s={width}x{height}:r={fps}:d={duration}",
+        "-f", "lavfi",
+        "-i", f"anullsrc=r={sample_rate}:cl=stereo",
+        "-shortest",
         "-c:v", "libx264",
         "-pix_fmt", "yuv420p",
+        "-c:a", "pcm_s16le",
         black_file
     ]
     subprocess.run(cmd_black, check=True)
@@ -1231,7 +1372,7 @@ Dialogue: 0,0:00:00.00,0:00:{duration:.2f},Default,,0,0,0,,{text}
     os.remove(ass_file)
     os.remove(black_file)
 
-    print(f"Created black still with subtitles: {output_file}")
+    print(f"✅ Created black still with subtitles and silent audio: {output_file}")
     return output_file
 
 
@@ -1302,105 +1443,6 @@ def run_cmd(cmd, output_file=None):
             print(f"✅ Created: {output_file}")
             
             
-def overlay_video(video1_path, video2_path, overlay_start_main, overlay_end_main, extract_start_video1, output_filename,crf=18,preset="fast"):
-    """
-    Create a video overlay with extraction and rescaling
-    
-    Args:
-        video1_path: Path to the overlay video
-        video2_path: Path to the main video
-        overlay_start_main: Start time for overlay in the main video (format: hh:mm:ss or seconds)
-        overlay_end_main: End time for overlay in the main video (format: hh:mm:ss or seconds)
-        extract_start_video1: Start time for extraction from overlay video (format: hh:mm:ss or seconds)
-        output_filename: Output filename for the final video
-    """
-    if os.path.exists(output_filename):
-        choice = input(f'"{output_filename}" already exists. Delete it? (y/n): ')
-        if choice.lower() == "y":
-            os.remove(output_filename)
-            print(f'Deleted existing "{output_filename}".')
-        else:
-            print("Aborted.")
-            return
-    # Parse time inputs
-    start_time_main = parse_time(overlay_start_main)
-    end_time_main = parse_time(overlay_end_main)
-    duration = end_time_main - start_time_main
-    print("duration:",duration)
-    extract_start = parse_time(extract_start_video1)
-    
-    # Create temporary directory for intermediate files
-    temp_dir = tempfile.mkdtemp()
-    
-    try:
-        # Step 1: Extract clip from overlay video
-        temp_extract = os.path.join(temp_dir, "extracted_clip.mp4")
-        cmd_extract = [
-            'ffmpeg',
-            '-ss', str(extract_start),
-            '-i', video1_path,
-            '-t', str(duration),
-            '-c', 'copy',
-            '-y',
-            temp_extract
-        ]
-        
-        print("Extracting clip from overlay video...")
-        print("FFmpeg command:", " ".join(cmd_extract))
-        subprocess.run(cmd_extract, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        
-        # Step 2: Remove audio and rescale
-        temp_muted = os.path.join(temp_dir, "muted_clip.mp4")
-        cmd_mute = [
-            'ffmpeg',
-            '-i', temp_extract,
-            '-an',
-            '-y',
-            temp_muted
-        ]
-        
-        print("Removing audio from extracted clip...")
-        print("FFmpeg command:", " ".join(cmd_mute))
-        subprocess.run(cmd_mute, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        
-        # Get dimensions of main video
-        main_width, main_height = get_media_dimensions(video2_path)
-        
-        # Rescale the muted clip
-        temp_rescaled = os.path.join(temp_dir, "rescaled_clip.mp4")
-        print("Rescaling the muted clip...")
-        make_rescaled_image(main_width, main_height, temp_muted, temp_rescaled)
-        
-        # Step 3: Create final overlay
-        cmd_final = [
-            'ffmpeg',
-            '-i', video2_path,
-            '-i', temp_rescaled,
-            '-filter_complex',
-            f"[1:v]setpts=PTS+{start_time_main}/TB[v1];[0:v][v1]overlay=0:0:enable='between(t,{start_time_main},{end_time_main})'",
-            '-c:a', 'copy',
-            '-c:v', 'libx264',
-            '-crf', str(crf),
-            '-preset', preset,
-            '-y',
-            output_filename
-        ]
-        
-        print("Creating final overlay...")
-        print("FFmpeg command:", " ".join(cmd_final))
-        subprocess.run(cmd_final, check=True)
-        print(f"Final video saved as {output_filename}")
-        
-    except subprocess.CalledProcessError as e:
-        print(f"Error during processing: {e}")
-    finally:
-        # Clean up temporary files
-        for file in [temp_extract, temp_muted, temp_rescaled]:
-            if os.path.exists(file):
-                os.remove(file)
-        os.rmdir(temp_dir)
-
-    
 
 
 def overlay_video_split_and_combine(
@@ -1517,8 +1559,9 @@ def overlay_video_split_and_combine(
                 pass
 
     print(f"🎉 Done: {output_file}")
+    
 
-def overlay_video2(video1_path, video2_path, overlay_start_main, overlay_end_main, extract_start_video1, output_filename, crf=18, preset="fast", fadeout=0):
+def overlay_video(video1_path, video2_path, overlay_start_main, overlay_end_main, extract_start_video1, output_filename, crf=18, preset="fast", fadeout=0):
     """
     Create a video overlay with extraction and rescaling
     
@@ -1636,3 +1679,177 @@ def overlay_video2(video1_path, video2_path, overlay_start_main, overlay_end_mai
             if os.path.exists(file):
                 os.remove(file)
         os.rmdir(temp_dir)
+
+def overlay_videos2(video_main, overlay_list, output_filename, crf=18, preset="fast"):
+    """
+    Overlay multiple videos on a main video.
+
+    Args:
+        video_main: Path to the main video
+        overlay_list: List of overlays, each as [overlay_path, overlay_start_main, overlay_end_main, extract_start, fadeout]
+        output_filename: Output filename
+        crf: FFmpeg CRF
+        preset: FFmpeg preset
+    """
+    import os
+    import subprocess
+    import tempfile
+    import shutil
+
+    if os.path.exists(output_filename):
+        choice = input(f'"{output_filename}" already exists. Delete it? (y/n): ')
+        if choice.lower() == "y":
+            os.remove(output_filename)
+            print(f'Deleted existing "{output_filename}".')
+        else:
+            print("Aborted.")
+            return
+
+    # Create temporary directory for intermediate files
+    temp_dir = tempfile.mkdtemp()
+    temp_video = video_main  # start with the main video
+
+    try:
+        for idx, overlay in enumerate(overlay_list):
+            overlay_path, overlay_start_main, overlay_end_main, extract_start_video, fadeout = overlay
+            fadeout = float(fadeout)
+
+            start_time_main = parse_time(overlay_start_main)
+            end_time_main = parse_time(overlay_end_main)
+            duration = end_time_main - start_time_main
+            extract_start = parse_time(extract_start_video)
+
+            # Extract overlay clip
+            temp_extract = os.path.join(temp_dir, f"extracted_clip_{idx}.mp4")
+            cmd_extract = [
+                'ffmpeg', '-ss', str(extract_start), '-i', overlay_path,
+                '-t', str(duration), '-c', 'copy', '-y', temp_extract
+            ]
+            subprocess.run(cmd_extract, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+            # Remove audio
+            temp_muted = os.path.join(temp_dir, f"muted_clip_{idx}.mp4")
+            cmd_mute = ['ffmpeg', '-i', temp_extract, '-an', '-y', temp_muted]
+            subprocess.run(cmd_mute, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+            # Rescale
+            main_width, main_height = get_media_dimensions(video_main)
+            temp_rescaled = os.path.join(temp_dir, f"rescaled_clip_{idx}.mp4")
+            make_rescaled_image(main_width, main_height, temp_muted, temp_rescaled)
+
+            # Overlay
+            temp_output = os.path.join(temp_dir, f"output_{idx}.mp4")
+
+            if fadeout != 0:
+                cmd_final = f'''
+                ffmpeg -i {temp_video} -i {temp_rescaled} -filter_complex "
+                [0:v]trim=0:{start_time_main},setpts=PTS-STARTPTS[part1];
+                color=c=black:size={main_width}x{main_height}:d={duration}[black];
+                [1:v]trim={extract_start}:{extract_start+duration},setpts=PTS-STARTPTS,format=rgba,fade=t=out:st={duration-fadeout}:d={fadeout}:alpha=1[ov];
+                [black][ov]overlay=x=(main_w-overlay_w)/2:y=(main_h-overlay_h)/2:shortest=1[part2];
+                [0:v]trim={end_time_main},setpts=PTS-STARTPTS[part3];
+                [part1][part2][part3]concat=n=3:v=1:a=0[vout]
+                " -map "[vout]" -map 0:a -c:v libx264 -pix_fmt yuv420p -preset {preset} -crf {crf} -c:a copy -y {temp_output}
+                '''
+                subprocess.run(cmd_final, shell=True, check=True)
+            else:
+                cmd_final = [
+                    'ffmpeg', '-i', temp_video, '-i', temp_rescaled,
+                    '-filter_complex',
+                    f"[1:v]setpts=PTS+{start_time_main}/TB[v1];[0:v][v1]overlay=0:0:enable='between(t,{start_time_main},{end_time_main})'",
+                    '-c:a', 'copy', '-c:v', 'libx264', '-crf', str(crf), '-preset', preset, '-y', temp_output
+                ]
+                subprocess.run(cmd_final, check=True)
+
+            temp_video = temp_output  # for next overlay
+
+        # Final move to output_filename
+        shutil.move(temp_video, output_filename)
+        print(f"Final video saved as {output_filename}")
+
+    finally:
+        # Clean up temporary files
+        shutil.rmtree(temp_dir)
+
+
+def overlay_videos_fast(video_main, overlay_list, output_filename, crf=18, preset="fast"):
+    """
+    Overlay multiple videos on a main video in one FFmpeg pass (faster).
+
+    Args:
+        video_main: Path to the main video
+        overlay_list: List of overlays, each as [overlay_path, overlay_start_main, overlay_end_main, extract_start, fadeout]
+        output_filename: Output filename
+        crf: FFmpeg CRF
+        preset: FFmpeg preset
+    """
+    import os
+    import subprocess
+    import tempfile
+    import shutil
+
+    if os.path.exists(output_filename):
+        choice = input(f'"{output_filename}" already exists. Delete it? (y/n): ')
+        if choice.lower() == "y":
+            os.remove(output_filename)
+            print(f'Deleted existing "{output_filename}".')
+        else:
+            print("Aborted.")
+            return
+
+    temp_dir = tempfile.mkdtemp()
+    main_width, main_height = get_media_dimensions(video_main)
+
+    try:
+        # Prepare inputs and filter chains
+        inputs = [f"-i {video_main}"]
+        overlays_cmds = []
+        overlay_streams = []
+
+        for idx, overlay in enumerate(overlay_list):
+            path, start_main, end_main, extract_start, fadeout = overlay
+            fadeout = float(fadeout)
+
+            start_main_sec = parse_time(start_main)
+            end_main_sec = parse_time(end_main)
+            duration = end_main_sec - start_main_sec
+            extract_start_sec = parse_time(extract_start)
+
+            temp_clip = os.path.join(temp_dir, f"overlay_{idx}.mp4")
+
+            # Extract the portion of overlay video needed
+            cmd_extract = [
+                'ffmpeg', '-ss', str(extract_start_sec), '-i', path,
+                '-t', str(duration), '-an', '-y', temp_clip
+            ]
+            subprocess.run(cmd_extract, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+            # Add as input
+            inputs.append(f"-i {temp_clip}")
+
+            # Build filter chain for this overlay
+            ov_stream = f"[{idx+1}:v]"
+            if fadeout != 0:
+                ov_stream += f"fade=t=out:st={duration-fadeout}:d={fadeout}:alpha=1,format=rgba"
+            overlay_streams.append((ov_stream, start_main_sec, end_main_sec))
+
+        # Build FFmpeg filter_complex
+        filter_complex = "[0:v]format=rgba[base];"
+        last_stream = "[base]"
+        for i, (ov_stream, start, end) in enumerate(overlay_streams):
+            out_stream = f"[v{i}]"
+            filter_complex += f"{last_stream}{ov_stream}overlay=x=(main_w-overlay_w)/2:y=(main_h-overlay_h)/2:enable='between(t,{start},{end})'{out_stream};"
+            last_stream = out_stream
+
+        filter_complex += f"{last_stream}[vout]"
+
+        # Construct final FFmpeg command
+        cmd = f"ffmpeg {' '.join(inputs)} -filter_complex \"{filter_complex}\" -map [vout] -map 0:a -c:v libx264 -crf {crf} -preset {preset} -c:a copy -y {output_filename}"
+
+        print("Running FFmpeg command...")
+        subprocess.run(cmd, shell=True, check=True)
+
+        print(f"Final video saved as {output_filename}")
+
+    finally:
+        shutil.rmtree(temp_dir)
