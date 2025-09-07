@@ -13,6 +13,8 @@ import matplotlib.font_manager as fm
 import tempfile
 import shutil
 import fractions
+import cv2
+import numpy as np
 
 
 def write_srt(segments, file):
@@ -198,6 +200,52 @@ def get_media_dimensions(file_path):
         else:
         # Handle error
            raise Exception(f"FFprobe error: {result.stderr}")
+           
+
+def get_media_active_dimensions(file_path, threshold=16, sample_frames=5):
+    cap = cv2.VideoCapture(file_path)
+    if not cap.isOpened():
+        print(f"Cannot open video: {file_path}")
+        return None, None
+
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    frame_indices = np.linspace(0, frame_count-1, sample_frames, dtype=int)
+
+    active_rects = []
+
+    for idx in frame_indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        ret, frame = cap.read()
+        if not ret:
+            continue
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        mask = gray > threshold
+        coords = np.column_stack(np.where(mask))
+        if coords.size == 0:
+            continue
+        y_min, x_min = coords.min(axis=0)
+        y_max, x_max = coords.max(axis=0)
+        active_rects.append((x_min, y_min, x_max, y_max))
+
+    cap.release()
+
+    if not active_rects:
+        print("No active content found in video.")
+        return None, None
+
+    # Combine all sampled frames to get overall active area
+    x_min = min(r[0] for r in active_rects)
+    y_min = min(r[1] for r in active_rects)
+    x_max = max(r[2] for r in active_rects)
+    y_max = max(r[3] for r in active_rects)
+
+    active_width = x_max - x_min + 1
+    active_height = y_max - y_min + 1
+
+    return active_width, active_height
+
+
+
 
 
 def get_video_length(input_file):
@@ -324,24 +372,39 @@ def check_file_type(filename):
     else:
         return "unknown"
 
-
-def make_rescaled_image(video_width, video_height, image_name, output_filename):
+    
+def make_rescaled_image(video_width, video_height, image_name, purpose,output_filename,crf=18,preset="fast"):
     """
     Calculate dimensions to scale an image to fit within video dimensions
     while maintaining aspect ratio
     """
     input_type = check_file_type(image_name)
     image_width, image_height = get_media_dimensions(image_name)
-    # Calculate scaling factors for width and height
     width_ratio = video_width / image_width
     height_ratio = video_height / image_height
-    
+    width,height = image_width, image_height
+    if input_type=="video":
+        active_width, active_height = get_media_active_dimensions(image_name)
+        if purpose=="combine" or purpose=="Combine":
+           width_ratio = video_width / image_width
+           height_ratio = video_height / image_height
+           width,height = image_width, image_height
+        elif purpose=="overlay" or purpose=="Overlay":
+           width_ratio = video_width / active_width
+           height_ratio = video_height / active_height
+           width,height = active_width, active_height
     # Use the smaller ratio to ensure the image fits within the video dimensions
+#    if active_width > active_height:
     scale_ratio = min(width_ratio, height_ratio)
+#    else:
+#       scale_ratio = min(active_width_ratio, active_height_ratio)
     
     # Calculate new dimensions
-    new_width = int(image_width * scale_ratio)
-    new_height = int(image_height * scale_ratio)
+#    new_width = int(image_width * scale_ratio)
+#    new_height = int(image_height * scale_ratio)
+    new_width = int(width * scale_ratio)
+    new_height = int(height * scale_ratio)
+    print("new width height:",new_width,new_height)
     
     if input_type == "image":
         cmd = [
@@ -367,8 +430,8 @@ def make_rescaled_image(video_width, video_height, image_name, output_filename):
             '-i', image_name,
             '-vf', f"scale={new_width}:{new_height},pad={video_width}:{video_height}:{pad_x}:{pad_y}:black",
             '-c:v', 'libx264',      # use H.264 for better control
-            '-preset', 'fast',      # encoding speed/efficiency trade-off
-            '-crf', '18',           # quality (lower = better, 18–23 is typical)
+            '-preset', preset,      # encoding speed/efficiency trade-off
+            '-crf', str(crf),           # quality (lower = better, 18–23 is typical)
             '-c:a', 'copy',         # keep original audio
             output_filename
         ]
@@ -376,6 +439,7 @@ def make_rescaled_image(video_width, video_height, image_name, output_filename):
         print("FFmpeg command:", ' '.join(cmd))
         
         # Run the FFmpeg command
+
         result = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -384,14 +448,18 @@ def make_rescaled_image(video_width, video_height, image_name, output_filename):
             bufsize=1
         )
         
+        
         # Print output in real-time
         for line in result.stdout:
             print(line, end='')
         
         # Wait for the process to complete
         result.wait()
+
+        
         
     # Check if the command was successful and the file was created
+
     if result.returncode == 0:
        if os.path.exists(output_filename) and os.path.getsize(output_filename) > 0:
            print(f"Successfully created {output_filename}")
@@ -402,6 +470,7 @@ def make_rescaled_image(video_width, video_height, image_name, output_filename):
        if result.stderr:
           print(f"FFmpeg error: {result.stderr}")
     return output_filename
+
 
 
 def separate_audio_video(input_video_path,outfolder,volume_factor):
@@ -506,16 +575,6 @@ def separate_audio_video(input_video_path,outfolder,volume_factor):
         print(f"Error: {e}")
         return False, None, None
 
-
-def preprocess(main_video,input_data,outfolder,volume_factor=0):
-    if not os.path.exists(outfolder):
-        os.makedirs(outfolder)
-    video_width, video_height = get_media_dimensions(main_video)
-    for img_name in input_data:
-        newfile = make_rescaled_image(video_width, video_height,img_name,outfolder)
-        newfile_type = check_file_type(newfile)
-        if newfile_type == "video":
-           success, muted_video, audio_file = separate_audio_video(newfile,outfolder,volume_factor)
 
 
 def parse_time(t):
@@ -900,38 +959,67 @@ def _td_to_time(td):
     cc = ms // 10
     return f"{h}:{m:02}:{s:02}.{cc:02}"
 
-def end_credits_ass(template_file, txt_file, output_file,
+
+def end_credits_ass(template_file, txt_file, output_file, width, height,
                    first_start="0:00:01.40", each_duration_s=6.0,
                    line_offset_s=0.60,
                    fallback_duration_s=4.0):
-    """
-    Inserts credits before existing Dialogues and shifts ALL existing Dialogues
-    so the first original Dialogue starts right after the last credit.
-    'fs90' dialogues are retimed: first starts 1s after credits, lasts 4s each,
-    chained sequentially.
-    """
+
+    def _time_to_td(t_str):
+        h, m, s = t_str.split(":")
+        sec, ms = (s.split(".") + ["0"])[:2]
+        return timedelta(hours=int(h), minutes=int(m), seconds=int(sec), milliseconds=int(ms))
+
+    def _td_to_time(td):
+        total_sec = td.total_seconds()
+        h = int(total_sec // 3600)
+        m = int((total_sec % 3600) // 60)
+        s = total_sec % 60
+        return f"{h}:{m:02}:{s:05.2f}"
+
     # Read template
     with open(template_file, "r", encoding="utf-8") as f:
         tpl_lines = [ln.rstrip("\n") for ln in f]
 
+    # Scale factor for font sizes
+    scale = height / 1080.0
+    base_font = int(100 * scale)
+    end_font = int(110 * scale)
+
+    # Adjust PlayResX, PlayResY, Style font size
+    adjusted_tpl = []
+    for ln in tpl_lines:
+        if ln.startswith("PlayResX:"):
+            adjusted_tpl.append(f"PlayResX: {width}")
+        elif ln.startswith("PlayResY:"):
+            adjusted_tpl.append(f"PlayResY: {height}")
+        elif ln.startswith("Style:"):
+            parts = ln.split(",")
+            parts[2] = str(base_font)   # Font size field
+            adjusted_tpl.append(",".join(parts))
+        elif "{\\fs110" in ln:  # end dialogue lines
+            adjusted_tpl.append(ln.replace("\\fs110", f"\\fs{end_font}"))
+        else:
+            adjusted_tpl.append(ln)
+
     # Locate [Events] and its Format line
     ev_idx = None
     fmt_idx = None
-    for i, ln in enumerate(tpl_lines):
+    for i, ln in enumerate(adjusted_tpl):
         if ln.strip().lower() == "[events]":
             ev_idx = i
-            for j in range(i + 1, len(tpl_lines)):
-                if tpl_lines[j].strip().lower().startswith("format:"):
+            for j in range(i + 1, len(adjusted_tpl)):
+                if adjusted_tpl[j].strip().lower().startswith("format:"):
                     fmt_idx = j
                     break
             break
     if ev_idx is None or fmt_idx is None:
         raise ValueError("Could not locate [Events] and its Format line in template.")
 
-    before_events = tpl_lines[:fmt_idx + 1]   # header + Format
-    events_tail  = tpl_lines[fmt_idx + 1:]    # Dialogue and other lines
+    before_events = adjusted_tpl[:fmt_idx + 1]
+    events_tail  = adjusted_tpl[fmt_idx + 1:]
 
-    # Parse credits.txt into grouped entries (indented lines belong to previous entry)
+    # Parse credits.txt into grouped entries
     with open(txt_file, "r", encoding="utf-8") as f:
         raw = [ln.rstrip("\n") for ln in f]
 
@@ -939,12 +1027,9 @@ def end_credits_ass(template_file, txt_file, output_file,
     for ln in raw:
         if not ln.strip():
             continue
-        if ln.startswith(" "):            # continuation line
-            if not current:
-                current = [ln.strip()]
-            else:
-                current.append(ln.strip())
-        else:                             # new entry
+        if ln.startswith(" "):
+            current.append(ln.strip())
+        else:
             if current:
                 entries.append(current)
             current = [ln.strip()]
@@ -958,11 +1043,10 @@ def end_credits_ass(template_file, txt_file, output_file,
     credit_lines = []
 
     def _credit_line(st_td, et_td, text, line_index=0):
-        y = 1080 + 40 * line_index
-        move_tag = f"{{\\move(960,{y},960,0)}}"
-        if line_index > 0:
-            pad = "\\h" * 13 + "    "
-            text = pad + text
+        center_x = width // 2
+        start_y = height + int(40 * scale) * line_index
+        end_y = int(height * 0.05)  # finish near top (5% margin)
+        move_tag = f"{{\\move({center_x},{start_y},{center_x},{end_y})}}"
         return f"Dialogue: 0,{_td_to_time(st_td)},{_td_to_time(et_td)},White,,0,0,0,,{move_tag}{text}"
 
     for entry in entries:
@@ -990,9 +1074,8 @@ def end_credits_ass(template_file, txt_file, output_file,
             parts[1] = _td_to_time(st)
             parts[2] = _td_to_time(et)
             adjusted_events.append(",".join(parts))
-            st = et  # chain next line start
+            st = et
 
-    # Append the non-fs90 lines unchanged
     adjusted_events.extend(other_lines)
 
     # Write output
@@ -1102,7 +1185,7 @@ def create_ending_film(ass_file, song_file, output_file, width, height,
     subprocess.run(cmd, check=True)
 
 
-def reencode_to_match(primary_video, list_to_reencode, crf="23", preset="fast"):
+def reencode_to_match(primary_video, list_to_reencode,purpose, crf="23", preset="fast"):
     """
     Re-encode a batch of videos to PCM, then rescale them using make_rescaled_image,
     and finally pad/truncate audio to match video duration.
@@ -1152,7 +1235,7 @@ def reencode_to_match(primary_video, list_to_reencode, crf="23", preset="fast"):
         subprocess.run(cmd_ffmpeg_reencode, check=True)
 
         # Step 3: Rescale/pad video using make_rescaled_image
-        make_rescaled_image(width, height, tmp_file, final_output)
+        make_rescaled_image(width, height, tmp_file, purpose,final_output,crf=crf,preset=preset)
 
         # Delete temporary re-encoded file
         if os.path.exists(tmp_file):
@@ -1242,7 +1325,7 @@ def combine_video(video_list, primary_index=1, output_file="output.mp4", crf=23,
 
     # Step 2: Re-encode videos to match primary_video
     if list_to_reencode:
-        all_reencoded_files,file_dict = reencode_to_match(primary_video, list_to_reencode,crf=crf, preset=preset)
+        all_reencoded_files,file_dict = reencode_to_match(primary_video, list_to_reencode,purpose="combine",crf=crf, preset=preset)
      
     reencoded_files_order,reencoded_files_path= [],[]
     idx =0
@@ -1778,10 +1861,10 @@ def overlay_video(main_video, para_list, output_file, crf=18, preset="fast"):
              success, temp_muted, audio_file = separate_audio_video(temp_extract,temp_dir,0)
              temp_rescaled = os.path.join(temp_dir, f"rescaled_clip_{i}.mp4")
              print("Rescaling the muted clip...")
-             make_rescaled_image(main_width, main_height, temp_muted, temp_rescaled)
+             make_rescaled_image(main_width, main_height, temp_muted, temp_rescaled,crf=crf,preset=preset)
              list_to_reencode.append(temp_rescaled)
 #        print(list_to_reencode)
-        reencoded_files,temp_reencoded_dict = reencode_to_match(main_video, list_to_reencode)
+        reencoded_files,temp_reencoded_dict = reencode_to_match(main_video, list_to_reencode,purpose="overlay",crf=crf, preset=preset)
 #        print(reencoded_files)
 #        print(temp_reencoded_dict)
         video_path = []
@@ -1932,4 +2015,598 @@ def overlay_video(main_video, para_list, output_file, crf=18, preset="fast"):
         # Clean up temporary files
         if os.path.exists(temp_dir):
            shutil.rmtree(temp_dir)  # removes all files and subfolders inside
+
+
+def create_zoom(image_list, main_video, crf=23, preset="medium"):
+    """
+    Create zoom-in videos from images using FFmpeg, matching main video properties.
+    Each image is first rescaled using make_rescaled_image, and a silent audio track
+    is added matching the main video audio codec.
+
+    Parameters:
+    - image_list: List of lists with format:
+      [image_file, x, y, duration, zoom_start_time, zoom_end_magnitude, output_file]
+    - main_video: path to main video to read fps, resolution, and audio codec
+    - crf: FFmpeg CRF value
+    - preset: FFmpeg preset
+    """
+
+    # --- Check if main video exists ---
+    if not os.path.exists(main_video):
+        raise FileNotFoundError(f"Main video '{main_video}' not found!")
+
+    # --- Check if all image files exist ---
+    for item in image_list:
+        img_file = item[0]
+        if not os.path.exists(img_file):
+            raise FileNotFoundError(f"Image file '{img_file}' not found!")
+
+    # --- Get main video info ---
+    cmd_info = f"ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate -of default=noprint_wrappers=1 {shlex.quote(main_video)}"
+    result = subprocess.run(cmd_info, shell=True, capture_output=True, text=True, check=True)
+
+    info = {}
+    for line in result.stdout.splitlines():
+        if "=" in line:
+            key, value = line.split("=")
+            info[key] = value
+
+    width = int(info.get("width", 854))
+    height = int(info.get("height", 480))
+    if 'r_frame_rate' in info:
+        num, denom = map(int, info['r_frame_rate'].split('/'))
+        fps = num / denom
+    else:
+        fps = 25
+
+    print(f"Main video info: {width}x{height}, fps={fps}")
+
+    # --- Get main video's audio codec ---
+    cmd_audio = f"ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of default=noprint_wrappers=1 {shlex.quote(main_video)}"
+    result_audio = subprocess.run(cmd_audio, shell=True, capture_output=True, text=True, check=True)
+    audio_codec = "aac"  # default
+    for line in result_audio.stdout.splitlines():
+        if line.startswith("codec_name="):
+            audio_codec = line.split("=")[1]
+            break
+    print(f"Main video audio codec: {audio_codec}")
+
+    # --- Process each image ---
+    for item in image_list:
+        img_file, x_pos, y_pos, duration, zoom_start, zoom_max, out_file = item
+        duration = float(duration)
+        zoom_start = float(zoom_start)
+        zoom_max = float(zoom_max)
+
+        # --- Step 1: Rescale image ---
+        rescaled_image = f"rescaled_{os.path.basename(img_file)}"
+        make_rescaled_image(width, height, img_file, purpose="overlay", output_filename=rescaled_image, crf=crf, preset=preset)
+
+        # --- Step 2: Create zoom video with silent audio ---
+        start_frame = int(zoom_start * fps)
+        end_frame = int(duration * fps)
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-loop", "1", "-i", rescaled_image,
+            "-f", "lavfi", "-t", str(duration), "-i", f"anullsrc=r=44100:cl=stereo",
+            "-filter_complex",
+            f"[0:v]format=rgba,zoompan="
+            f"z='if(lte(on,{start_frame}),1,1+(on-{start_frame})/({end_frame}-{start_frame})*({zoom_max}-1))':"
+            f"x='{x_pos}-(iw/zoom/2)':"
+            f"y='{y_pos}-(ih/zoom/2)':"
+            f"d=1:s={width}x{height},framerate={fps},trim=duration={duration}[v]",
+            "-map", "[v]",
+            "-map", "1:a",
+            "-c:v", "libx264",
+            "-crf", str(crf),
+            "-preset", preset,
+            "-pix_fmt", "yuv420p",
+            "-c:a", audio_codec,
+            out_file
+        ]
+
+        print("Running command:", " ".join(cmd))
+        subprocess.run(cmd, check=True)
+
+
+
+
+def overlay_video_and_img(main_video, para_list, output_file, crf=18, preset="fast"):
+    """
+    Create a video overlay with extraction and rescaling
+    
+    Args:
+        video1_path: Path to the overlay video
+        video2_path: Path to the main video
+        overlay_start_main: Start time for overlay in the main video (format: hh:mm:ss or seconds)
+        overlay_end_main: End time for overlay in the main video (format: hh:mm:ss or seconds)
+        extract_start_video1: Start time for extraction from overlay video (format: hh:mm:ss or seconds)
+        output_filename: Output filename for the final video
+        fadeout: Duration of fadeout effect in seconds (0 means no fadeout)
+    """
+    if os.path.exists(output_file):
+        choice = input(f'"{output_file}" already exists. Delete it? (y/n): ')
+        if choice.lower() == "y":
+            os.remove(output_file)
+            print(f'Deleted existing "{output_file}".')
+        else:
+            print("Aborted.")
+            return
+            
+    if not os.path.isfile(main_video):
+        raise FileNotFoundError(f"The file '{main_video}' does not exist.")
+    
+    # Check if overlay videos in para_list exist
+    for params in para_list:
+        overlay_video = params[0]  # Assuming first element is video path
+        if not os.path.isfile(overlay_video):
+            raise FileNotFoundError(f"The overlay file '{overlay_video}' does not exist.")
+    
+    
+
+
+    # Create temporary directory for intermediate files
+    temp_dir = tempfile.mkdtemp()
+    print("temp_dir: ",temp_dir)
+    
+    video_num = len(para_list)
+    print(video_num)
+    list_to_reencode = []
+    try:
+        main_width, main_height = get_media_dimensions(main_video)
+        
+        all_video,all_img = [],[]
+        for i,item in enumerate(para_list):
+            input_type = check_file_type(item[0])
+            if input_type == "video":
+                all_video.append(item)
+            else:
+                all_img.append(item)
+        img_path = []
+        for i,item in enumerate(all_img):
+            suffix = Path(item[0]).suffix
+            temp_img = os.path.join(temp_dir, f"{i}_rescaled{suffix}")
+            make_rescaled_image(main_width, main_height, item[0],"combine",temp_img)
+            img_path.append(temp_img)
+        
+        for i,item in enumerate(all_video):
+             overlay_video = item[0]
+             overlay_start_main = item[1]
+             overlay_end_main = item[2]
+             extract_start_video1 = item[3]
+             start_time_main = parse_time(overlay_start_main)
+             end_time_main = parse_time(overlay_end_main)
+             duration = end_time_main - start_time_main
+             extract_start = parse_time(extract_start_video1)
+        # Step 1: Extract clip from overlay video
+             temp_extract = os.path.join(temp_dir, f"extracted_clip_{i}.mp4")
+             cmd_extract = [
+               'ffmpeg',
+               '-ss', str(extract_start),
+               '-i', overlay_video,
+               '-t', str(f'{duration}'), #str(extract_duration)
+               '-c', 'copy',
+               '-y',
+               temp_extract
+            ]
+        
+             print("Extracting clip from overlay video...")
+             print("FFmpeg command:", " ".join(cmd_extract))
+             subprocess.run(cmd_extract, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        # Step 2: Remove audio and rescale
+             success, temp_muted, audio_file = separate_audio_video(temp_extract,temp_dir,0)
+             temp_rescaled = os.path.join(temp_dir, f"rescaled_clip_{i}.mp4")
+             print("Rescaling the muted clip...")
+             make_rescaled_image(main_width, main_height, temp_muted, temp_rescaled,crf=crf,preset=preset)
+             list_to_reencode.append(temp_rescaled)
+#        print(list_to_reencode)
+        reencoded_files,temp_reencoded_dict = reencode_to_match(main_video, list_to_reencode,purpose="overlay",crf=crf, preset=preset)
+#        print(reencoded_files)
+#        print(temp_reencoded_dict)
+        video_path = []
+        for k in reencoded_files:
+            shutil.copy2(k,temp_dir)
+            video_path_tmp = os.path.join(temp_dir, k)
+            video_path.append(video_path_tmp)
+            os.remove(k)
+#        print("video paths")
+#        print(video_path)
+         
+    
+        # Step 4: writing the cmd
+
+       
+
+        item_to_remove = video_path[0] # the main video is not included
+        overlay_video_path = [item for item in video_path if item != item_to_remove]
+        new_para_list = []
+        for new_video, params in zip(overlay_video_path, para_list):
+            a,b,c,d,e = params
+            a = new_video
+            new_para_list.append([new_video,b,c,d,e])
+
+        cmd = ["ffmpeg", "-i", video_path[0]]
+        cmd_print = ["ffmpeg", "-i", video_path[0]]
+
+# add overlay videos
+        for ov in new_para_list:
+            cmd.append("-i")
+            cmd.append(f"{ov[0]}")
+            cmd_print.append(f"-i {ov[0]}")
+
+# add overlay images
+        for img_file, *_ in img_list:
+            cmd.append("-i")
+            cmd.append(img_file)
+            cmd_print.append(f"-i {img_file}")
+
+        cmd.append("-filter_complex")
+        cmd_print.append("-filter_complex")
+
+        trim_lines = []
+        black_lines = []
+        ov_lines = []
+        ov_on_black_lines = []
+        apply_overlay_lines = []
+        concat_parts = []
+
+        last_end = 0
+
+# ===== VIDEO PART (your original logic) =====
+        for i, (video, start, end, unrelated, fade_dur) in enumerate(new_para_list, start=1):
+            start_sec = parse_time(start)
+            end_sec = parse_time(end)
+            duration = end_sec - start_sec
+
+            # main video segments
+            if start_sec > last_end:
+                trim_lines.append(
+                    f"[0:v]trim={last_end}:{start_sec},setpts=PTS-STARTPTS[main_pre{i}]; "
+                )
+                concat_parts.append(f"[main_pre{i}]")
+
+            trim_lines.append(
+                f"[0:v]trim={start_sec}:{end_sec},setpts=PTS-STARTPTS[main_mid{i}];  "
+            )
+            concat_parts.append(f"[main_ov{i}]")
+            last_end = end_sec
+
+            # black background
+            black_lines.append(
+                f"color=black:size={main_width}x{main_height}:d={duration}[black{i}]; "
+            )
+
+            # overlay input with fade
+            fade_start = duration - float(fade_dur)
+            ov_lines.append(
+                f"[{i}:v]trim=0:{duration},setpts=PTS-STARTPTS,format=rgba,"
+                f"fade=t=out:st={fade_start}:d={fade_dur}:alpha=1[ov{i}]; "
+            )
+
+            # overlay on black
+            ov_on_black_lines.append(
+                f"[black{i}][ov{i}]overlay=x=(W-overlay_w)/2:y=(H-overlay_h)/2:shortest=1[ov_final{i}]; "
+            )
+
+            # apply overlay to main video
+            apply_overlay_lines.append(
+                f"[main_mid{i}][ov_final{i}]overlay[main_ov{i}];"
+            )
+
+        # remaining main video
+        trim_lines.append(
+            f"[0:v]trim={last_end},setpts=PTS-STARTPTS[main_post];"
+        )
+        concat_parts.append("[main_post]")
+
+        # concat
+        concat_line = (
+            f"{''.join(concat_parts)}concat=n={len(concat_parts)}:v=1:a=0[vout];"
+        )
+
+        # ===== IMAGE PART (new) =====
+        img_lines = []
+        img_overlays = []
+
+        for j, (img_file, start, end, unused, fade_dur) in enumerate(img_list, start=1):
+            start_sec = parse_time(start)
+            end_sec = parse_time(end)
+            fade_dur = float(fade_dur)
+            duration = end_sec - start_sec
+
+            img_lines.append(
+                f"[{len(new_para_list)+j}:v]loop=loop=-1:size=1:start=0,"
+                f"setpts=PTS-STARTPTS,format=rgba,"
+                f"scale=w=min(iw\\,{main_width}):h=min(ih\\,{main_height}):"
+                f"force_original_aspect_ratio=decrease,"
+                f"pad={main_width}:{main_height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+                f"fade=t=in:st={start_sec}:d=0:alpha=1,"
+                f"fade=t=out:st={end_sec-fade_dur}:d={fade_dur}:alpha=1[img{j}];"
+            )
+
+            base = "vout" if j == 1 else f"imgout{j-1}"
+            out = f"imgout{j}" if j < len(img_list) else "vout_final"
+            img_overlays.append(
+                f"[{base}][img{j}]overlay=enable='between(t,{start_sec},{end_sec})':shortest=1[{out}];"
+            )
+
+        # ===== BUILD FILTER COMPLEX =====
+        filter_complex = " ".join(
+           trim_lines
+           + black_lines
+           + ov_lines
+           + ov_on_black_lines
+           + apply_overlay_lines
+           + [concat_line]
+           + img_lines
+           + img_overlays
+        )
+
+        filter_complex_print = "\n ".join(
+           trim_lines
+           + black_lines
+           + ov_lines
+           + ov_on_black_lines
+           + apply_overlay_lines
+           + [concat_line]
+           + img_lines
+           + img_overlays
+        )
+
+        cmd.append(filter_complex)
+        cmd.append("-map")
+        cmd.append("[vout_final]" if img_list else "[vout]")
+        cmd.append("-map")
+        cmd.append("0:a")
+        cmd.append("-c:v")
+        cmd.append("libx264")
+        cmd.append("-pix_fmt")
+        cmd.append("yuv420p")
+        cmd.append(f"-preset")
+        cmd.append(preset)
+        cmd.append("-crf")
+        cmd.append(str(crf))
+        cmd.append("-c:a")
+        cmd.append("aac")
+        cmd.append("-b:a")
+        cmd.append("192k")
+        cmd.append(f"-movflags")
+        cmd.append("+faststart")
+        cmd.append("-y")
+        cmd.append(output_file)
+
+        print(cmd)
+        cmd_print.append(filter_complex_print)
+        cmd_print.append(
+           f"-map [vout_final if img_list else vout] -map 0:a -c:v libx264 -pix_fmt yuv420p "
+           f"-preset {preset} -crf {crf} -c:a aac -b:a 192k "
+           f"-movflags +faststart -y {output_file}"
+        )
+
+        full_cmd = " ".join(cmd)
+        full_cmd_print = " ".join(cmd_print)
+        # print("Generated ffmpeg command:\n", full_cmd_print)
+
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"Error during processing: {e}")
+#    finally:
+        # Clean up temporary files
+#        if os.path.exists(temp_dir):
+#           shutil.rmtree(temp_dir)  # removes all files and subfolders inside
+
+
+
+def overlay_video_and_img2(main_video, para_list, output_file, crf=18, preset="fast"):
+    """
+    Create a video overlay with extraction and rescaling
+    
+    Args:
+        video1_path: Path to the overlay video
+        video2_path: Path to the main video
+        overlay_start_main: Start time for overlay in the main video (format: hh:mm:ss or seconds)
+        overlay_end_main: End time for overlay in the main video (format: hh:mm:ss or seconds)
+        extract_start_video1: Start time for extraction from overlay video (format: hh:mm:ss or seconds)
+        output_filename: Output filename for the final video
+        fadeout: Duration of fadeout effect in seconds (0 means no fadeout)
+    """
+    if os.path.exists(output_file):
+        choice = input(f'"{output_file}" already exists. Delete it? (y/n): ')
+        if choice.lower() == "y":
+            os.remove(output_file)
+            print(f'Deleted existing "{output_file}".')
+        else:
+            print("Aborted.")
+            return
+            
+    if not os.path.isfile(main_video):
+        raise FileNotFoundError(f"The file '{main_video}' does not exist.")
+    
+    # Check if overlay videos in para_list exist
+    for params in para_list:
+        overlay_video = params[0]  # Assuming first element is video path
+        if not os.path.isfile(overlay_video):
+            raise FileNotFoundError(f"The overlay file '{overlay_video}' does not exist.")
+
+
+    main_width, main_height = get_media_dimensions(main_video)
+        
+    all_video,img_list = [],[]
+    for i,item in enumerate(para_list):
+            input_type = check_file_type(item[0])
+            if input_type == "video":
+                all_video.append(item)
+            else:
+                img_list.append(item)
+
+            
+#    item_to_remove = video_path[0] # the main video is not included
+    overlay_video_path = all_video
+    new_para_list = []
+    for new_video, params in zip(overlay_video_path, para_list):
+            a,b,c,d,e = params
+            a = new_video
+            new_para_list.append([new_video,b,c,d,e])
+
+    cmd = ["ffmpeg", "-i", main_video]
+    cmd_print = ["ffmpeg", "-i", main_video]
+
+    # add overlay videos
+    for ov in all_video:
+            cmd.append("-i")
+            cmd.append(f"{ov[0]}")
+            cmd_print.append(f"-i {ov[0]}")
+
+# add overlay images
+    for item in img_list:
+            cmd.append("-i")
+            cmd.append(item[0])
+            cmd_print.append(f"-i {item[0]}")
+
+    cmd.append("-filter_complex")
+    cmd_print.append("-filter_complex")
+
+    trim_lines = []
+    black_lines = []
+    ov_lines = []
+    ov_on_black_lines = []
+    apply_overlay_lines = []
+    concat_parts = []
+
+    last_end = 0
+
+# ===== VIDEO PART (your original logic) =====
+    for i, (video, start, end, unrelated, fade_dur) in enumerate(new_para_list, start=1):
+            start_sec = parse_time(start)
+            end_sec = parse_time(end)
+            duration = end_sec - start_sec
+
+            # main video segments
+            if start_sec > last_end:
+                trim_lines.append(
+                    f"[0:v]trim={last_end}:{start_sec},setpts=PTS-STARTPTS[main_pre{i}]; "
+                )
+                concat_parts.append(f"[main_pre{i}]")
+
+            trim_lines.append(
+                f"[0:v]trim={start_sec}:{end_sec},setpts=PTS-STARTPTS[main_mid{i}];  "
+            )
+            concat_parts.append(f"[main_ov{i}]")
+            last_end = end_sec
+
+            # black background
+            black_lines.append(
+                f"color=black:size={main_width}x{main_height}:d={duration}[black{i}]; "
+            )
+
+            # overlay input with fade
+            fade_start = duration - float(fade_dur)
+            ov_lines.append(
+                f"[{i}:v]trim=0:{duration},setpts=PTS-STARTPTS,format=rgba,"
+                f"fade=t=out:st={fade_start}:d={fade_dur}:alpha=1[ov{i}]; "
+            )
+
+            # overlay on black
+            ov_on_black_lines.append(
+                f"[black{i}][ov{i}]overlay=x=(W-overlay_w)/2:y=(H-overlay_h)/2:shortest=1[ov_final{i}]; "
+            )
+
+            # apply overlay to main video
+            apply_overlay_lines.append(
+                f"[main_mid{i}][ov_final{i}]overlay[main_ov{i}];"
+            )
+
+        # remaining main video
+    trim_lines.append(
+            f"[0:v]trim={last_end},setpts=PTS-STARTPTS[main_post];"
+    )
+    concat_parts.append("[main_post]")
+
+        # concat
+    concat_line = (
+            f"{''.join(concat_parts)}concat=n={len(concat_parts)}:v=1:a=0[vout];"
+    )
+
+        # ===== IMAGE PART (new) =====
+    img_lines = []
+    img_overlays = []
+
+    for j, (img_file, start, end, unused, fade_dur) in enumerate(img_list, start=1):
+            start_sec = parse_time(start)
+            end_sec = parse_time(end)
+            fade_dur = float(fade_dur)
+            duration = end_sec - start_sec
+
+            img_lines.append(
+                f"[{len(new_para_list)+j}:v]loop=loop=-1:size=1:start=0,"
+                f"setpts=PTS-STARTPTS,format=rgba,"
+                f"scale=w=min(iw\\,{main_width}):h=min(ih\\,{main_height}):"
+                f"force_original_aspect_ratio=decrease,"
+                f"pad={main_width}:{main_height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+                f"fade=t=in:st={start_sec}:d=0:alpha=1,"
+                f"fade=t=out:st={end_sec-fade_dur}:d={fade_dur}:alpha=1[img{j}];"
+            )
+
+            base = "vout" if j == 1 else f"imgout{j-1}"
+            out = f"imgout{j}" if j < len(img_list) else "vout_final"
+            img_overlays.append(
+                f"[{base}][img{j}]overlay=enable='between(t,{start_sec},{end_sec})':shortest=1[{out}];"
+            )
+
+        # ===== BUILD FILTER COMPLEX =====
+    filter_complex = " ".join(
+           trim_lines
+           + black_lines
+           + ov_lines
+           + ov_on_black_lines
+           + apply_overlay_lines
+           + [concat_line]
+           + img_lines
+           + img_overlays
+    )
+
+    filter_complex_print = "\n ".join(
+           trim_lines
+           + black_lines
+           + ov_lines
+           + ov_on_black_lines
+           + apply_overlay_lines
+           + [concat_line]
+           + img_lines
+           + img_overlays
+    )
+
+    cmd.append(filter_complex)
+    cmd.append("-map")
+    cmd.append("[vout_final]" if img_list else "[vout]")
+    cmd.append("-map")
+    cmd.append("0:a")
+    cmd.append("-c:v")
+    cmd.append("libx264")
+    cmd.append("-pix_fmt")
+    cmd.append("yuv420p")
+    cmd.append(f"-preset")
+    cmd.append(preset)
+    cmd.append("-crf")
+    cmd.append(str(crf))
+    cmd.append("-c:a")
+    cmd.append("aac")
+    cmd.append("-b:a")
+    cmd.append("192k")
+    cmd.append(f"-movflags")
+    cmd.append("+faststart")
+    cmd.append("-y")
+    cmd.append(output_file)
+    cmd_print.append(filter_complex_print)
+    cmd_print.append(
+           f"-map [vout_final if img_list else vout] -map 0:a -c:v libx264 -pix_fmt yuv420p "
+           f"-preset {preset} -crf {crf} -c:a aac -b:a 192k "
+           f"-movflags +faststart -y {output_file}"
+        )
+
+    full_cmd = " ".join(cmd)
+    full_cmd_print = "\n ".join(cmd_print)
+    print("Generated ffmpeg command:\n", full_cmd_print)
+    subprocess.run(cmd, check=True)
 
