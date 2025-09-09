@@ -2074,8 +2074,9 @@ def create_zoom(image_list, main_video, crf=23, preset="medium"):
     # --- Process each image ---
     for item in image_list:
         img_file, x_pos, y_pos, duration, zoom_start, zoom_max, out_file = item
-        duration = float(duration)
-        zoom_start = float(zoom_start)
+
+        duration = parse_time(duration)
+        zoom_start = parse_time(zoom_start)
         zoom_max = float(zoom_max)
 
         # --- Step 1: Rescale image ---
@@ -2110,8 +2111,6 @@ def create_zoom(image_list, main_video, crf=23, preset="medium"):
         subprocess.run(cmd, check=True)
 
 
-
-
 def overlay_video_and_img(main_video, para_list, output_file, crf=18, preset="fast"):
     """
     Create a video overlay with extraction and rescaling
@@ -2142,9 +2141,10 @@ def overlay_video_and_img(main_video, para_list, output_file, crf=18, preset="fa
         overlay_video = params[0]  # Assuming first element is video path
         if not os.path.isfile(overlay_video):
             raise FileNotFoundError(f"The overlay file '{overlay_video}' does not exist.")
-    
-    
 
+
+    main_width, main_height = get_media_dimensions(main_video)
+    
 
     # Create temporary directory for intermediate files
     temp_dir = tempfile.mkdtemp()
@@ -2163,12 +2163,14 @@ def overlay_video_and_img(main_video, para_list, output_file, crf=18, preset="fa
                 all_video.append(item)
             else:
                 all_img.append(item)
-        img_path = []
+                
+        img_path,img_list = [],[]
         for i,item in enumerate(all_img):
             suffix = Path(item[0]).suffix
             temp_img = os.path.join(temp_dir, f"{i}_rescaled{suffix}")
             make_rescaled_image(main_width, main_height, item[0],"combine",temp_img)
             img_path.append(temp_img)
+            img_list.append([temp_img,item[1],item[2],item[3]])
         
         for i,item in enumerate(all_video):
              overlay_video = item[0]
@@ -2198,7 +2200,7 @@ def overlay_video_and_img(main_video, para_list, output_file, crf=18, preset="fa
              success, temp_muted, audio_file = separate_audio_video(temp_extract,temp_dir,0)
              temp_rescaled = os.path.join(temp_dir, f"rescaled_clip_{i}.mp4")
              print("Rescaling the muted clip...")
-             make_rescaled_image(main_width, main_height, temp_muted, temp_rescaled,crf=crf,preset=preset)
+             make_rescaled_image(main_width, main_height, temp_muted, "overlay",temp_rescaled,crf=crf,preset=preset)
              list_to_reencode.append(temp_rescaled)
 #        print(list_to_reencode)
         reencoded_files,temp_reencoded_dict = reencode_to_match(main_video, list_to_reencode,purpose="overlay",crf=crf, preset=preset)
@@ -2212,12 +2214,9 @@ def overlay_video_and_img(main_video, para_list, output_file, crf=18, preset="fa
             os.remove(k)
 #        print("video paths")
 #        print(video_path)
-         
     
-        # Step 4: writing the cmd
 
-       
-
+            
         item_to_remove = video_path[0] # the main video is not included
         overlay_video_path = [item for item in video_path if item != item_to_remove]
         new_para_list = []
@@ -2226,20 +2225,20 @@ def overlay_video_and_img(main_video, para_list, output_file, crf=18, preset="fa
             a = new_video
             new_para_list.append([new_video,b,c,d,e])
 
-        cmd = ["ffmpeg", "-i", video_path[0]]
-        cmd_print = ["ffmpeg", "-i", video_path[0]]
+        cmd = ["ffmpeg", "-i", main_video]
+        cmd_print = ["ffmpeg", "-i", main_video]
 
-# add overlay videos
-        for ov in new_para_list:
+    # add overlay videos
+        for ov in all_video:
             cmd.append("-i")
             cmd.append(f"{ov[0]}")
             cmd_print.append(f"-i {ov[0]}")
 
 # add overlay images
-        for img_file, *_ in img_list:
+        for item in img_list:
             cmd.append("-i")
-            cmd.append(img_file)
-            cmd_print.append(f"-i {img_file}")
+            cmd.append(item[0])
+            cmd_print.append(f"-i {item[0]}")
 
         cmd.append("-filter_complex")
         cmd_print.append("-filter_complex")
@@ -2254,7 +2253,7 @@ def overlay_video_and_img(main_video, para_list, output_file, crf=18, preset="fa
         last_end = 0
 
 # ===== VIDEO PART (your original logic) =====
-        for i, (video, start, end, unrelated, fade_dur) in enumerate(new_para_list, start=1):
+        for i, (video, start, end, unrelated,fade_dur) in enumerate(new_para_list, start=1):
             start_sec = parse_time(start)
             end_sec = parse_time(end)
             duration = end_sec - start_sec
@@ -2309,7 +2308,7 @@ def overlay_video_and_img(main_video, para_list, output_file, crf=18, preset="fa
         img_lines = []
         img_overlays = []
 
-        for j, (img_file, start, end, unused, fade_dur) in enumerate(img_list, start=1):
+        for j, (img_file, start, end, fade_dur) in enumerate(img_list, start=1):
             start_sec = parse_time(start)
             end_sec = parse_time(end)
             fade_dur = float(fade_dur)
@@ -2375,19 +2374,16 @@ def overlay_video_and_img(main_video, para_list, output_file, crf=18, preset="fa
         cmd.append("+faststart")
         cmd.append("-y")
         cmd.append(output_file)
-
-        print(cmd)
         cmd_print.append(filter_complex_print)
         cmd_print.append(
            f"-map [vout_final if img_list else vout] -map 0:a -c:v libx264 -pix_fmt yuv420p "
            f"-preset {preset} -crf {crf} -c:a aac -b:a 192k "
            f"-movflags +faststart -y {output_file}"
-        )
+            )
 
         full_cmd = " ".join(cmd)
-        full_cmd_print = " ".join(cmd_print)
-        # print("Generated ffmpeg command:\n", full_cmd_print)
-
+        full_cmd_print = "\n ".join(cmd_print)
+        print("Generated ffmpeg command:\n", full_cmd_print)
         subprocess.run(cmd, check=True)
     except subprocess.CalledProcessError as e:
         print(f"Error during processing: {e}")
@@ -2396,217 +2392,4 @@ def overlay_video_and_img(main_video, para_list, output_file, crf=18, preset="fa
 #        if os.path.exists(temp_dir):
 #           shutil.rmtree(temp_dir)  # removes all files and subfolders inside
 
-
-
-def overlay_video_and_img2(main_video, para_list, output_file, crf=18, preset="fast"):
-    """
-    Create a video overlay with extraction and rescaling
-    
-    Args:
-        video1_path: Path to the overlay video
-        video2_path: Path to the main video
-        overlay_start_main: Start time for overlay in the main video (format: hh:mm:ss or seconds)
-        overlay_end_main: End time for overlay in the main video (format: hh:mm:ss or seconds)
-        extract_start_video1: Start time for extraction from overlay video (format: hh:mm:ss or seconds)
-        output_filename: Output filename for the final video
-        fadeout: Duration of fadeout effect in seconds (0 means no fadeout)
-    """
-    if os.path.exists(output_file):
-        choice = input(f'"{output_file}" already exists. Delete it? (y/n): ')
-        if choice.lower() == "y":
-            os.remove(output_file)
-            print(f'Deleted existing "{output_file}".')
-        else:
-            print("Aborted.")
-            return
-            
-    if not os.path.isfile(main_video):
-        raise FileNotFoundError(f"The file '{main_video}' does not exist.")
-    
-    # Check if overlay videos in para_list exist
-    for params in para_list:
-        overlay_video = params[0]  # Assuming first element is video path
-        if not os.path.isfile(overlay_video):
-            raise FileNotFoundError(f"The overlay file '{overlay_video}' does not exist.")
-
-
-    main_width, main_height = get_media_dimensions(main_video)
-        
-    all_video,img_list = [],[]
-    for i,item in enumerate(para_list):
-            input_type = check_file_type(item[0])
-            if input_type == "video":
-                all_video.append(item)
-            else:
-                img_list.append(item)
-
-            
-#    item_to_remove = video_path[0] # the main video is not included
-    overlay_video_path = all_video
-    new_para_list = []
-    for new_video, params in zip(overlay_video_path, para_list):
-            a,b,c,d,e = params
-            a = new_video
-            new_para_list.append([new_video,b,c,d,e])
-
-    cmd = ["ffmpeg", "-i", main_video]
-    cmd_print = ["ffmpeg", "-i", main_video]
-
-    # add overlay videos
-    for ov in all_video:
-            cmd.append("-i")
-            cmd.append(f"{ov[0]}")
-            cmd_print.append(f"-i {ov[0]}")
-
-# add overlay images
-    for item in img_list:
-            cmd.append("-i")
-            cmd.append(item[0])
-            cmd_print.append(f"-i {item[0]}")
-
-    cmd.append("-filter_complex")
-    cmd_print.append("-filter_complex")
-
-    trim_lines = []
-    black_lines = []
-    ov_lines = []
-    ov_on_black_lines = []
-    apply_overlay_lines = []
-    concat_parts = []
-
-    last_end = 0
-
-# ===== VIDEO PART (your original logic) =====
-    for i, (video, start, end, unrelated, fade_dur) in enumerate(new_para_list, start=1):
-            start_sec = parse_time(start)
-            end_sec = parse_time(end)
-            duration = end_sec - start_sec
-
-            # main video segments
-            if start_sec > last_end:
-                trim_lines.append(
-                    f"[0:v]trim={last_end}:{start_sec},setpts=PTS-STARTPTS[main_pre{i}]; "
-                )
-                concat_parts.append(f"[main_pre{i}]")
-
-            trim_lines.append(
-                f"[0:v]trim={start_sec}:{end_sec},setpts=PTS-STARTPTS[main_mid{i}];  "
-            )
-            concat_parts.append(f"[main_ov{i}]")
-            last_end = end_sec
-
-            # black background
-            black_lines.append(
-                f"color=black:size={main_width}x{main_height}:d={duration}[black{i}]; "
-            )
-
-            # overlay input with fade
-            fade_start = duration - float(fade_dur)
-            ov_lines.append(
-                f"[{i}:v]trim=0:{duration},setpts=PTS-STARTPTS,format=rgba,"
-                f"fade=t=out:st={fade_start}:d={fade_dur}:alpha=1[ov{i}]; "
-            )
-
-            # overlay on black
-            ov_on_black_lines.append(
-                f"[black{i}][ov{i}]overlay=x=(W-overlay_w)/2:y=(H-overlay_h)/2:shortest=1[ov_final{i}]; "
-            )
-
-            # apply overlay to main video
-            apply_overlay_lines.append(
-                f"[main_mid{i}][ov_final{i}]overlay[main_ov{i}];"
-            )
-
-        # remaining main video
-    trim_lines.append(
-            f"[0:v]trim={last_end},setpts=PTS-STARTPTS[main_post];"
-    )
-    concat_parts.append("[main_post]")
-
-        # concat
-    concat_line = (
-            f"{''.join(concat_parts)}concat=n={len(concat_parts)}:v=1:a=0[vout];"
-    )
-
-        # ===== IMAGE PART (new) =====
-    img_lines = []
-    img_overlays = []
-
-    for j, (img_file, start, end, unused, fade_dur) in enumerate(img_list, start=1):
-            start_sec = parse_time(start)
-            end_sec = parse_time(end)
-            fade_dur = float(fade_dur)
-            duration = end_sec - start_sec
-
-            img_lines.append(
-                f"[{len(new_para_list)+j}:v]loop=loop=-1:size=1:start=0,"
-                f"setpts=PTS-STARTPTS,format=rgba,"
-                f"scale=w=min(iw\\,{main_width}):h=min(ih\\,{main_height}):"
-                f"force_original_aspect_ratio=decrease,"
-                f"pad={main_width}:{main_height}:(ow-iw)/2:(oh-ih)/2:color=black,"
-                f"fade=t=in:st={start_sec}:d=0:alpha=1,"
-                f"fade=t=out:st={end_sec-fade_dur}:d={fade_dur}:alpha=1[img{j}];"
-            )
-
-            base = "vout" if j == 1 else f"imgout{j-1}"
-            out = f"imgout{j}" if j < len(img_list) else "vout_final"
-            img_overlays.append(
-                f"[{base}][img{j}]overlay=enable='between(t,{start_sec},{end_sec})':shortest=1[{out}];"
-            )
-
-        # ===== BUILD FILTER COMPLEX =====
-    filter_complex = " ".join(
-           trim_lines
-           + black_lines
-           + ov_lines
-           + ov_on_black_lines
-           + apply_overlay_lines
-           + [concat_line]
-           + img_lines
-           + img_overlays
-    )
-
-    filter_complex_print = "\n ".join(
-           trim_lines
-           + black_lines
-           + ov_lines
-           + ov_on_black_lines
-           + apply_overlay_lines
-           + [concat_line]
-           + img_lines
-           + img_overlays
-    )
-
-    cmd.append(filter_complex)
-    cmd.append("-map")
-    cmd.append("[vout_final]" if img_list else "[vout]")
-    cmd.append("-map")
-    cmd.append("0:a")
-    cmd.append("-c:v")
-    cmd.append("libx264")
-    cmd.append("-pix_fmt")
-    cmd.append("yuv420p")
-    cmd.append(f"-preset")
-    cmd.append(preset)
-    cmd.append("-crf")
-    cmd.append(str(crf))
-    cmd.append("-c:a")
-    cmd.append("aac")
-    cmd.append("-b:a")
-    cmd.append("192k")
-    cmd.append(f"-movflags")
-    cmd.append("+faststart")
-    cmd.append("-y")
-    cmd.append(output_file)
-    cmd_print.append(filter_complex_print)
-    cmd_print.append(
-           f"-map [vout_final if img_list else vout] -map 0:a -c:v libx264 -pix_fmt yuv420p "
-           f"-preset {preset} -crf {crf} -c:a aac -b:a 192k "
-           f"-movflags +faststart -y {output_file}"
-        )
-
-    full_cmd = " ".join(cmd)
-    full_cmd_print = "\n ".join(cmd_print)
-    print("Generated ffmpeg command:\n", full_cmd_print)
-    subprocess.run(cmd, check=True)
 
