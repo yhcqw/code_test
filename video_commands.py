@@ -13,8 +13,10 @@ import matplotlib.font_manager as fm
 import tempfile
 import shutil
 import fractions
-import cv2
 import numpy as np
+from typing import Optional
+
+
 
 
 def write_srt(segments, file):
@@ -35,8 +37,8 @@ def write_srt(segments, file):
         file.write(f"{text}\n\n")
 
 
-def voice_to_srt(video_file, outputsrt, lang=None):
-    print("source /Users/china_108/Desktop/python/whisper-env/bin/activate")
+def voice_to_srt(video_file, outputsrt, lang=None): #convert voice to subtitles in srt format
+    print("Remember to switch to whisper environment first!")
     import whisper
     import opencc
     model = whisper.load_model("base")  # or "medium", "large", etc.
@@ -56,9 +58,58 @@ def voice_to_srt(video_file, outputsrt, lang=None):
         print(f'"{outputsrt}" created (overwritten if existed)')
     else:
         print(f'Error: "{outputsrt}" not created or is empty')
+        
 
+def translate_srt_google(input_path, output_path, target_lang, source_lang="auto"):
+    """
+    Read an SRT file from `input_path`, translate only the subtitle text lines,
+    and write the translated SRT to `output_path`.
 
-def deepl_translate_srt(input_file, output_file,lang):
+    Parameters:
+        input_path (str): path to the input .srt file
+        output_path (str): path to write the translated .srt file
+        target_lang (str): target language code (e.g. "en", "ja", "zh-cn")
+        source_lang (str): source language code or "auto" (default "auto")
+    
+    Returns:
+        str: the translated SRT content (also written to output_path)
+    """
+    from deep_translator import GoogleTranslator
+    # translator (single instance)
+    translator = GoogleTranslator(source=source_lang, target=target_lang)
+
+    # read file (tolerant to encoding issues)
+    with open(input_path, "r", encoding="utf-8", errors="replace") as f:
+        lines = f.read().splitlines()
+
+    out_lines = []
+    for line in lines:
+        stripped = line.strip()
+        # keep index lines, timestamps, and blank lines unchanged
+        if stripped == "" or stripped.isdigit() or "-->" in line:
+            out_lines.append(line)
+            continue
+
+        # translate subtitle text only
+        try:
+            translated = translator.translate(stripped)
+        except Exception as e:
+            # on error, keep original and print a short warning
+            print(f"Warning: translation failed for line (kept original): {stripped[:60]}...  ({e})")
+            translated = stripped
+
+        out_lines.append(translated)
+
+    # join and ensure final newline
+    result = "\n".join(out_lines) + "\n"
+
+    # write output
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(result)
+
+    return result
+
+def deepl_translate_srt(input_file, output_file,lang): #translation using deepl
     import deepl
     from openai import OpenAI
     with open('api_deepl.txt', 'r') as f:
@@ -93,7 +144,7 @@ def deepl_translate_srt(input_file, output_file,lang):
             
         print(f"Deepl translation complete! Output saved to {output_file}")
 
-
+#combining srt files of different languages, one line one language, this is for proofreading purpose
 def combine_srt(file1_path, file2_path, output_path):
     """
     Combines two SRT subtitle files by placing file2's text first followed by file1's text,
@@ -131,7 +182,7 @@ def combine_srt(file1_path, file2_path, output_path):
     min_length = min(len(subs1), len(subs2))
     
     for i in range(min_length):
-        new_text = subs2[i]['text'] + subs1[i]['text']  # file2 text first
+        new_text = subs1[i]['text'] + subs2[i]['text']  # file1 text first
         combined.append({
             'index': subs1[i]['index'],
             'time': subs1[i]['time'],
@@ -147,7 +198,39 @@ def combine_srt(file1_path, file2_path, output_path):
     print(f"{output_path} created")
 
 
-def trim_video(input_file, start_time, end_time, output_file):
+def separate_srt_languages(input_file, language_choice, output_file):
+    language_choice = str(language_choice)
+    with open(input_file, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    blocks = content.strip().split('\n\n')
+    output_blocks = []
+    
+    for block in blocks:
+        lines = block.split('\n')
+        if len(lines) < 3:
+            continue
+        
+        index_line = lines[0]
+        time_line = lines[1]
+        text_lines = lines[2:]
+        
+        if language_choice == '1':
+            selected_text = text_lines[0]
+        elif language_choice == '2':
+            selected_text = text_lines[1] if len(text_lines) > 1 else ''
+        else:
+            raise ValueError("Language choice must be '1' or '2'")
+        
+        new_block = f"{index_line}\n{time_line}\n{selected_text}"
+        output_blocks.append(new_block)
+    
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write('\n\n'.join(output_blocks))
+    print(f"{output_file} created")
+
+#extracting part of the video, say 1:00-2:00 from the original video
+def trim_video(input_file, start_time, end_time, output_file,crf=18, preset = "veyfast"):
     """
     Trim a video using ffmpeg between start_time and end_time.
     """
@@ -169,8 +252,8 @@ def trim_video(input_file, start_time, end_time, output_file):
         "-to", end_time,
         "-i", input_file,
         "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "18",
+        "-preset", preset,
+        "-crf", str(crf),
         "-c:a", "copy",
         output_file
 ]
@@ -179,7 +262,8 @@ def trim_video(input_file, start_time, end_time, output_file):
     print("Running command:", " ".join(cmd))
     subprocess.run(cmd, check=True)
     print(f"Created trimmed video: {output_file}")
-        
+  
+#simply the dimensions of the video.
 def get_media_dimensions(file_path):
 
         cmd_v = [
@@ -201,8 +285,9 @@ def get_media_dimensions(file_path):
         # Handle error
            raise Exception(f"FFprobe error: {result.stderr}")
            
-
+#active dimensions does not include blacking padding. For portrait videos, you get a dimension of width > height because black padding is included. this would cause issues in rescaling
 def get_media_active_dimensions(file_path, threshold=16, sample_frames=5):
+    import cv2
     cap = cv2.VideoCapture(file_path)
     if not cap.isOpened():
         print(f"Cannot open video: {file_path}")
@@ -310,6 +395,7 @@ def print_media_info(file_list):
             f
         ]
         video_info = subprocess.run(cmd_v, capture_output=True, text=True).stdout.strip()
+        print("video info: "," ".join(cmd_v))
         print("Video:", video_info)
 
         # Audio info
@@ -322,6 +408,7 @@ def print_media_info(file_list):
             f
         ]
         audio_info = subprocess.run(cmd_a, capture_output=True, text=True).stdout.strip()
+        print("audio info: "," ".join(cmd_a))
         print("Audio:", audio_info)
 
         # New command to get start_time and duration for both streams
@@ -378,7 +465,8 @@ def check_file_type(filename):
     else:
         return "unknown"
 
-    
+
+#rescale videos and images for combination
 def make_rescaled_image(video_width, video_height, image_name, output_filename,crf=18,preset="fast",purpose="combine"):
     """
     Calculate dimensions to scale an image to fit within video dimensions
@@ -421,8 +509,8 @@ def make_rescaled_image(video_width, video_height, image_name, output_filename,c
             output_filename
         ]
     
-        print("FFmpeg command:", ' '.join(cmd))
-    
+        print("Rescaling image: \n", ' '.join(cmd))
+            
         # Run the FFmpeg command
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     
@@ -442,7 +530,7 @@ def make_rescaled_image(video_width, video_height, image_name, output_filename,c
             output_filename
         ]
         
-        print("FFmpeg command:", ' '.join(cmd))
+        print("Rescaling video \n:", ' '.join(cmd))
         
         # Run the FFmpeg command
 
@@ -476,10 +564,9 @@ def make_rescaled_image(video_width, video_height, image_name, output_filename,c
        if result.stderr:
           print(f"FFmpeg error: {result.stderr}")
     return output_filename
-
-
-
-def separate_audio_video(input_video_path,outfolder,volume_factor):
+  
+#separate audio from video and save them as different files, with audio in wav format
+def separate_audio_video(input_video_path, outfolder, volume_factor):
     """
     Separate the audio and video streams from an input video file.
     
@@ -498,35 +585,54 @@ def separate_audio_video(input_video_path,outfolder,volume_factor):
         base_name = input_path.stem
         extension = input_path.suffix
         if volume_factor == 0:
-            muted_video_path = os.path.join(outfolder,f"{base_name}_muted{extension}")
+            muted_video_path = os.path.join(outfolder, f"{base_name}_muted{extension}")
         else:
-            muted_video_path = os.path.join(outfolder,f"{base_name}_{volume_factor}{extension}")
-        audio_path = os.path.join(outfolder,f"{base_name}.wav")
-        
+            muted_video_path = os.path.join(outfolder, f"{base_name}_{volume_factor}{extension}")
+        audio_path = os.path.join(outfolder, f"{base_name}.wav")
+
         # Check if input file exists
         if not input_path.exists():
             raise FileNotFoundError(f"Input file {input_video_path} does not exist")
-        
-        # Create muted video (video stream only)
-        """
-        mute_cmd = [
-            'ffmpeg',
+
+        # Check if video has audio stream
+        check_audio_cmd = [
+            'ffprobe',
             '-i', input_video_path,
-            '-an',  # disable audio
-            '-c:v', 'copy',  # copy video stream without re-encoding
-            muted_video_path
-        ]
-        """
-        mute_cmd = [
-            'ffmpeg',
-            '-y',
-            '-i', input_video_path,
-            '-filter:a', f'volume={volume_factor}',
-            '-c:v', 'copy',  # copy video stream without re-encoding
-            muted_video_path
+            '-show_streams',
+            '-select_streams', 'a',
+            '-loglevel', 'error'
         ]
         
-        print(f"Creating video of {volume_factor} sound volume : {muted_video_path}")
+        audio_check = subprocess.run(
+            check_audio_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        print("Checking if the video has an audio stream: \n"," ".join(check_audio_cmd))
+        has_audio = audio_check.returncode == 0 and audio_check.stdout.strip() != ''
+
+        # Create video with adjusted audio volume (if audio exists)
+        if has_audio:
+            mute_cmd = [
+                'ffmpeg',
+                '-y',
+                '-i', input_video_path,
+                '-filter:a', f'volume={volume_factor}',
+                '-c:v', 'copy',
+                muted_video_path
+            ]
+        else:
+            mute_cmd = [
+                'ffmpeg',
+                '-y',
+                '-i', input_video_path,
+                '-an',  # No audio stream to process
+                '-c:v', 'copy',
+                muted_video_path
+            ]
+        print(f"Creating video with adjusted audio: \n"," ".join(mute_cmd))
+        print(f"Creating video with adjusted audio: {muted_video_path}")
         mute_result = subprocess.run(
             mute_cmd,
             stdout=subprocess.PIPE,
@@ -535,53 +641,52 @@ def separate_audio_video(input_video_path,outfolder,volume_factor):
         )
         
         if mute_result.returncode != 0:
-            raise Exception(f"Error creating muted video: {mute_result.stderr}")
-        
-        # Extract audio as WAV
-        audio_cmd = [
-            'ffmpeg',
-            '-i', input_video_path,
-            '-vn',  # disable video
-            '-acodec', 'pcm_s16le',  # PCM 16-bit little-endian (standard WAV format)
-            '-ar', '44100',  # sample rate 44.1kHz
-            '-ac', '2',  # stereo audio
-            audio_path
-        ]
-        
-        print("FFmpeg command:", ' '.join(audio_cmd))
+            raise Exception(f"Error creating video: {mute_result.stderr}")
 
-        print(f"Extracting audio: {audio_path}")
-        audio_result = subprocess.run(
-            audio_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        
-        if audio_result.returncode != 0:
-            # Clean up the muted video if audio extraction failed
-            if os.path.exists(muted_video_path):
-                os.remove(muted_video_path)
-            raise Exception(f"Error extracting audio: {audio_result.stderr}")
-        
-        # Verify both files were created
+        # Extract audio only if audio stream exists
+        if has_audio:
+            audio_cmd = [
+                'ffmpeg',
+                '-i', input_video_path,
+                '-vn',
+                '-acodec', 'pcm_s16le',
+                '-ar', '44100',
+                '-ac', '2',
+                audio_path
+            ]
+            print(f"Extracting audio: \n"," ".join(audio_cmd))
+            print(f"Extracting audio: {audio_path}")
+            audio_result = subprocess.run(
+                audio_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            print(" ".join(audio_cmd))
+            if audio_result.returncode != 0:
+                if os.path.exists(muted_video_path):
+                    os.remove(muted_video_path)
+                raise Exception(f"Error extracting audio: {audio_result.stderr}")
+        else:
+            audio_path = None
+            print("No audio stream found - skipping audio extraction")
+
+        # Verify the video file was created
         if not os.path.exists(muted_video_path):
-            raise Exception(f"Muted video file was not created: {muted_video_path}")
-        
-        if not os.path.exists(audio_path):
-            raise Exception(f"Audio file was not created: {audio_path}")
-        
+            raise Exception(f"Output video file was not created: {muted_video_path}")
+
         print(f"Successfully created:")
-        print(f"  - {volume_factor} volume video: {muted_video_path}")
-        print(f"  - Audio: {audio_path}")
+        print(f"  - Adjusted video: {muted_video_path}")
+        if has_audio:
+            print(f"  - Audio: {audio_path}")
+        else:
+            print(f"  - Audio: None (no audio stream found)")
         
         return True, muted_video_path, audio_path
-        
+
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error: {str(e)}")
         return False, None, None
-
-
 
 def parse_time(t):
 #    Convert time input into seconds (float).
@@ -611,6 +716,7 @@ def parse_time(t):
     raise ValueError(f"Unsupported time format: {t}")
 
 
+#extracting a screen shot
 def extract_frames(input_file, time_and_name_list, fast_seek=True):
     """
     Extract multiple frames from a video at specific times using FFmpeg
@@ -818,7 +924,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             f.write(e + "\n")
 
     print(f"✅ Converted {srt_file} → {ass_file} successfully!")
-    
+  
+#add a grid to the screenshot to check for the position of the mosaic
 def add_numbered_grid(
     input_file,
     output_file,
@@ -867,7 +974,7 @@ def add_numbered_grid(
     print(f"Saved new image with numbered grid lines: {output_file}")
 
 
-
+#produce hard-core subtitles, both in srt and ass format
 def burn_subtitles(input_video, subtitle_file, output_video, font="Arial", crf = 18,preset="veryfast",fontsdir=None):
     """
     Burn subtitles into a video using ffmpeg.
@@ -965,11 +1072,13 @@ def _td_to_time(td):
     cc = ms // 10
     return f"{h}:{m:02}:{s:02}.{cc:02}"
 
-
+#produce an ass file of the credits at the end
 def end_credits_ass(template_file, txt_file, output_file, width, height,
-                   first_start="0:00:01.40", each_duration_s=6.0,
-                   line_offset_s=0.60,
-                   fallback_duration_s=4.0):
+                     first_start="0:00:01.40", each_duration_s=6.0,
+                     line_offset_s=0.60,
+                     fallback_duration_s=4.0):
+
+    from datetime import timedelta
 
     def _time_to_td(t_str):
         h, m, s = t_str.split(":")
@@ -983,6 +1092,10 @@ def end_credits_ass(template_file, txt_file, output_file, width, height,
         s = total_sec % 60
         return f"{h}:{m:02}:{s:05.2f}"
 
+    # convert every normal/full-width space into an ASS hard-space override {\h}
+    def _convert_spaces(text):
+        return text.replace(" ", "\\h\\h")
+
     # Read template
     with open(template_file, "r", encoding="utf-8") as f:
         tpl_lines = [ln.rstrip("\n") for ln in f]
@@ -992,7 +1105,7 @@ def end_credits_ass(template_file, txt_file, output_file, width, height,
     base_font = int(100 * scale)
     end_font = int(110 * scale)
 
-    # Adjust PlayResX, PlayResY, Style font size
+    # Adjust template font sizes and resolution
     adjusted_tpl = []
     for ln in tpl_lines:
         if ln.startswith("PlayResX:"):
@@ -1025,53 +1138,57 @@ def end_credits_ass(template_file, txt_file, output_file, width, height,
     before_events = adjusted_tpl[:fmt_idx + 1]
     events_tail  = adjusted_tpl[fmt_idx + 1:]
 
-    # Parse credits.txt into grouped entries
+    # Parse credits.txt into raw lines (keep leading spaces)
     with open(txt_file, "r", encoding="utf-8") as f:
-        raw = [ln.rstrip("\n") for ln in f]
-
-    entries, current = [], []
-    for ln in raw:
-        if not ln.strip():
-            continue
-        if ln.startswith(" "):
-            current.append(ln.strip())
-        else:
-            if current:
-                entries.append(current)
-            current = [ln.strip()]
-    if current:
-        entries.append(current)
+        raw_lines = [ln.rstrip("\n") for ln in f if ln.rstrip("\n") != ""]
 
     # Build credit Dialogue lines
     start_time = _time_to_td(first_start)
     dur = timedelta(seconds=each_duration_s)
-    line_offset = timedelta(seconds=line_offset_s)
+    offset = timedelta(seconds=line_offset_s)
     credit_lines = []
 
-    def _credit_line(st_td, et_td, text, line_index=0):
+    def _credit_line(st_td, et_td, text):
         center_x = width // 2
-        start_y = height + int(40 * scale) * line_index
+        start_y = height
         end_y = int(height * 0.05)  # finish near top (5% margin)
         move_tag = f"{{\\move({center_x},{start_y},{center_x},{end_y})}}"
         return f"Dialogue: 0,{_td_to_time(st_td)},{_td_to_time(et_td)},White,,0,0,0,,{move_tag}{text}"
 
-    for entry in entries:
-        line_ends = []
-        for idx, text in enumerate(entry):
-            st = start_time + line_offset * idx
-            et = st + dur
-            credit_lines.append(_credit_line(st, et, text, line_index=idx))
-            line_ends.append(et)
-        start_time = max(line_ends)
+    prev_normal_end = start_time
+    prev_line_start = None
 
-    last_credit_end = start_time
+    for ln in raw_lines:
+        # detect "indented" if first 3 chars are spaces (normal or full-width)
+        is_indented = len(ln) >= 3 and all(ch in (" ", "　") for ch in ln[:3])
+
+        if is_indented:
+            # start = previous normal *start* + offset (fallback to prev_normal_end if prev_line_start is None)
+            if prev_line_start is None:
+                st = prev_normal_end
+            else:
+                st = prev_line_start + offset
+            et = st + dur
+            # convert ALL spaces (including leading ones) to {\h}
+            converted = _convert_spaces(ln)
+            credit_lines.append(_credit_line(st, et, converted))
+            prev_normal_end = et
+        else:  # normal line
+            st = prev_normal_end
+            et = st + dur
+            converted = _convert_spaces(ln)
+            credit_lines.append(_credit_line(st, et, converted))
+            prev_line_start = st
+            prev_normal_end = et
+
+    last_credit_end = prev_normal_end
     fallback = timedelta(seconds=fallback_duration_s)
 
     adjusted_events = []
     original_dialogue_lines = [ln for ln in events_tail if "Dialogue:" in ln]
     other_lines = [ln for ln in events_tail if ln not in original_dialogue_lines]
 
-    # Retime fs90 lines sequentially
+    # Retime original lines sequentially after credits
     if original_dialogue_lines:
         st = last_credit_end + timedelta(seconds=1)
         for i, ln in enumerate(original_dialogue_lines):
@@ -1094,6 +1211,10 @@ def end_credits_ass(template_file, txt_file, output_file, width, height,
             f.write(ln + "\n")
 
 
+
+
+
+#create and ending film with the credits as an ass file
 def create_ending_film(ass_file, song_file, output_file, width, height,
                        volume=1.0, end_second=5, fadein=5, fadeout=10,
                        bg_video=None,video_fadeout=4):
@@ -1189,9 +1310,11 @@ def create_ending_film(ass_file, song_file, output_file, width, height,
 
     print("FFmpeg command:\n", " ".join(cmd))
     subprocess.run(cmd, check=True)
+    
 
 
-def reencode_to_match(primary_video, list_to_reencode,purpose, crf="23", preset="fast"):
+#reencode all files so that they have the same codec, this is for concatenation
+def reencode_to_match(primary_video, list_to_reencode, crf="23", preset="fast", purpose="combine"):
     """
     Re-encode a batch of videos to PCM, then rescale them using make_rescaled_image,
     and finally pad/truncate audio to match video duration.
@@ -1202,6 +1325,18 @@ def reencode_to_match(primary_video, list_to_reencode,purpose, crf="23", preset=
 
     reencoded_files = []
     all_videos = [primary_video] + list_to_reencode
+
+    # Helper function to check if a video has audio
+    def has_audio_stream(video_path):
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "a",
+            "-show_entries", "stream=codec_type",
+            "-of", "csv=p=0",
+            video_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        return result.stdout.strip() != ''
 
     for input_video in all_videos:
         if not os.path.exists(input_video):
@@ -1216,32 +1351,55 @@ def reencode_to_match(primary_video, list_to_reencode,purpose, crf="23", preset=
         cmd_probe = [
             "ffprobe", "-v", "error",
             "-select_streams", "v:0",
-            "-show_entries", "stream=width,height,r_frame_rate",
+            "-show_entries", "stream=width,height,r_frame_rate,duration",
             "-of", "json",
             primary_video
         ]
+        print("Get main video's codec: \n"," ".join(cmd_probe))
         v_info = json.loads(subprocess.run(cmd_probe, capture_output=True, text=True).stdout)["streams"][0]
         width, height = v_info["width"], v_info["height"]
         fps_str = v_info["r_frame_rate"]
         primary_fps = float(fractions.Fraction(fps_str))
+        primary_video_duration = v_info["duration"]
 
-        # Step 2: Re-encode to PCM
-        cmd_ffmpeg_reencode = [
-            "ffmpeg", "-y", "-i", input_video,
-            "-r", str(primary_fps),
-            "-c:v", "libx264",
-            "-c:a", "pcm_s16le",
-            "-ar", "44100",
-            "-ac", "2",
-            "-preset", preset,
-            "-crf", str(crf),
-            tmp_file
-        ]
-        print(f"⚡ Re-encoding audio to PCM: {input_video} → {tmp_file}")
+        # Check if the video has an audio stream
+        has_audio = has_audio_stream(input_video)
+        
+        # Step 2: Re-encode to PCM (with silent audio if needed)
+        if has_audio:
+            cmd_ffmpeg_reencode = [
+                "ffmpeg", "-y", "-i", input_video,
+                "-r", str(primary_fps),
+                "-c:v", "libx264",
+                "-c:a", "pcm_s16le",
+                "-ar", "44100",
+                "-ac", "2",
+                "-preset", preset,
+                "-crf", str(crf),
+                tmp_file
+            ]
+        else:
+            # Add silent audio stream using anullsrc
+            cmd_ffmpeg_reencode = [
+                "ffmpeg", "-y", "-i", input_video,
+                "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                "-r", str(primary_fps),
+                "-c:v", "libx264",
+                "-c:a", "pcm_s16le",
+                "-ar", "44100",
+                "-ac", "2",
+                "-preset", preset,
+                "-crf", str(crf),
+                "-shortest",  # Ensure output duration matches video duration
+                "-map", "0:v", "-map", "1:a",  # Map video from first input, audio from second
+                tmp_file
+            ]
+        print("Re-encode to PCM: \n"," ".join(cmd_ffmpeg_reencode))
+        print(f"⚡ Re-encoding {'with audio' if has_audio else 'with silent audio'}: {input_video} → {tmp_file}")
         subprocess.run(cmd_ffmpeg_reencode, check=True)
 
         # Step 3: Rescale/pad video using make_rescaled_image
-        make_rescaled_image(width, height, tmp_file,final_output,crf=crf,preset=preset,purpose="combine")
+        make_rescaled_image(width, height, tmp_file, final_output, crf=crf, preset=preset, purpose="combine")
 
         # Delete temporary re-encoded file
         if os.path.exists(tmp_file):
@@ -1266,6 +1424,7 @@ def reencode_to_match(primary_video, list_to_reencode,purpose, crf="23", preset=
             padded_output
         ]
         print(f"⚡ Padding audio to match video: {final_output} → {padded_output}")
+        print("Pad/truncate audio to match video duration: \n"," ".join(cmd_ffmpeg_pad))
         subprocess.run(cmd_ffmpeg_pad, check=True)
 
         # Remove original final_output, keep padded one
@@ -1280,9 +1439,7 @@ def reencode_to_match(primary_video, list_to_reencode,purpose, crf="23", preset=
 
     return reencoded_files, reencode_list
 
-  
-
-# videos have audios = pcm, then concat use audio = aac, or there is slight missynchronization
+# all audios are in aac format for concatenation
 def combine_video(video_list, primary_index=1, output_file="output.mp4", crf=23, preset="fast"):
     """
     Combine multiple videos into one.
@@ -1374,7 +1531,7 @@ def combine_video(video_list, primary_index=1, output_file="output.mp4", crf=23,
 
 
 
-
+#mp3 format audio may have issues in concatenation, so you have to convert them to wav first
 def mp3_to_wav(mp3_file):
     """
     Convert an MP3 file to WAV with the same name (different suffix).
@@ -1386,7 +1543,7 @@ def mp3_to_wav(mp3_file):
     print(f"Converted: {mp3_file} -> {wav_file}")
     return wav_file
 
-
+#adjust the volume of an audio file
 def adjust_wav_volume(wav_file, volume_factor):
     """
     Adjust the volume of a WAV file and save as new file.
@@ -1410,7 +1567,7 @@ def adjust_wav_volume(wav_file, volume_factor):
     print(f"Volume adjusted: {wav_file} -> {output_file}")
     return output_file
 
-
+#split a video into different sections, with audios all in wav
 def split_video(input_file, sections, output_files=None, audio_codec="wav"):
     """
     Split a video into multiple sections.
@@ -1505,12 +1662,11 @@ def split_video(input_file, sections, output_files=None, audio_codec="wav"):
         print(f"✅ Created: {output_file}")
     
   
-
+#creating a still by burning in text as an ass file
 def create_black_still(
     main_video,
     text,
-    start_time,
-    end_time,
+    duration,
     output_file="black_still.mp4",
     font_name="Arial",
     font_size=72,
@@ -1541,6 +1697,7 @@ def create_black_still(
         main_video
     ]
     audio_output = subprocess.check_output(cmd_audio).decode().splitlines()
+
     if len(audio_output) == 2:
         sample_rate, channels = map(int, audio_output)
     else:
@@ -1548,7 +1705,7 @@ def create_black_still(
         sample_rate, channels = 44100, 2
 
     # Calculate duration
-    duration = parse_time(end_time) - parse_time(start_time)
+    duration = int(duration)
     if duration <= 0:
         raise ValueError("End time must be after start time")
 
@@ -1589,7 +1746,8 @@ Dialogue: 0,0:00:00.00,0:00:{duration:.2f},Default,,0,0,0,,{text}
         black_file
     ]
     subprocess.run(cmd_black, check=True)
-
+    print(" ".join(cmd_black))
+ 
     # Burn subtitle
     cmd_burn = [
         "ffmpeg", "-y",
@@ -1601,66 +1759,13 @@ Dialogue: 0,0:00:00.00,0:00:{duration:.2f},Default,,0,0,0,,{text}
         output_file
     ]
     subprocess.run(cmd_burn, check=True)
-
+    print(" ".join(cmd_burn))
     # Cleanup
     os.remove(ass_file)
     os.remove(black_file)
 
     print(f"✅ Created black still with subtitles and silent audio: {output_file}")
     return output_file
-
-
-def overlay_black_still_on_video(
-    input_video,
-    black_file,
-    start_time,
-    end_time,
-    output_file="output.mov",
-    crf=18,
-    preset="fast"
-):
-    """
-    Overlay black_file on input_video from start_time to end_time.
-    Scales overlay to match input video dimensions.
-    """
-    start_sec = parse_time(start_time)
-    end_sec = parse_time(end_time)
-
-    if end_sec <= start_sec:
-        raise ValueError("end_time must be after start_time")
-
-    # Get input video dimensions
-    probe_cmd = [
-        "ffprobe", "-v", "error",
-        "-select_streams", "v:0",
-        "-show_entries", "stream=width,height",
-        "-of", "csv=p=0",
-        input_video
-    ]
-    dimensions = subprocess.run(probe_cmd, stdout=subprocess.PIPE, check=True).stdout
-    width, height = dimensions.decode().strip().split(',')
-
-    # FFmpeg overlay with scaling
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i", input_video,
-        "-i", black_file,
-        "-filter_complex",
-        f"[1:v]scale={width}:{height}[scaled];"  # Scale overlay to match input
-        f"[0:v][scaled]overlay=enable='between(t,{start_sec},{end_sec})'",
-        "-c:v", "libx264",
-        "-crf", str(crf),
-        "-preset", preset,
-        "-c:a", "copy",
-        output_file
-    ]
-
-    subprocess.run(cmd, check=True)
-    print(f"Overlay complete. Output saved to {output_file}")
-    return output_file
-    
-
 
 
 def run_cmd(cmd, output_file=None):
@@ -1678,123 +1783,7 @@ def run_cmd(cmd, output_file=None):
             
             
 
-
-def overlay_video_split_and_combine(
-    main_video,
-    overlay_video,
-    overlay_start,        # e.g. "1:01"
-    overlay_duration,     # e.g. "30"
-    main_insert_at,       # e.g. "5:00"
-    output_file="output.mp4",
-    crf=20,
-    preset="veryfast",
-    keep_intermediates=False
-):
-    """
-    Replace a section of the main video with an overlay, but keep the original main audio.
-    """
-
-    # ---- parse times ----
-    o_start = parse_time(overlay_start)
-    o_dur   = parse_time(overlay_duration)
-    m_at    = parse_time(main_insert_at)
-    if o_dur <= 0:
-        raise ValueError("overlay_duration must be > 0")
-
-    # Intermediate files
-    trimmed_overlay     = "tmp_overlay_trimmed.mp4"
-    main_audio          = "tmp_overlay_audio.wav"
-    overlay_with_audio  = "tmp_overlay_with_audio.mp4"
-    part1               = "tmp_main_part1.mp4"
-    part2               = "tmp_main_part2.mp4"
-
-    skip = m_at + o_dur
-
-    # ---- Prepare all 6 commands ----
-    cmd1 = [
-        "ffmpeg", "-y",
-        "-i", overlay_video,
-        "-ss", f"{o_start:.3f}",
-        "-t",  f"{o_dur:.3f}",
-        "-an",  # drop any audio from overlay
-        "-c:v", "libx264", "-crf", str(crf), "-preset", preset, "-pix_fmt", "yuv420p",
-        trimmed_overlay
-    ]
-
-    cmd2 = [
-        "ffmpeg", "-y",
-        "-i", main_video,
-        "-ss", f"{m_at:.3f}",
-        "-t",  f"{o_dur:.3f}",
-        "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2",
-        main_audio
-    ]
-
-    cmd3 = [
-        "ffmpeg", "-y",
-        "-i", trimmed_overlay,
-        "-i", main_audio,
-        "-c:v", "copy",
-        "-c:a", "pcm_s16le",
-        overlay_with_audio
-    ]
-
-    cmd4 = [
-        "ffmpeg", "-y",
-        "-i", main_video,
-        "-t", f"{m_at:.3f}",
-        "-c:v", "libx264", "-crf", str(crf), "-preset", preset, "-pix_fmt", "yuv420p",
-        "-c:a", "pcm_s16le",
-        part1
-    ]
-
-    cmd5 = [
-        "ffmpeg", "-y",
-        "-i", main_video,
-        "-ss", f"{skip:.3f}",
-        "-c:v", "libx264", "-crf", str(crf), "-preset", preset, "-pix_fmt", "yuv420p",
-        "-c:a", "pcm_s16le",
-        part2
-    ]
-
-    cmd6 = [
-        "ffmpeg", "-y",
-        "-i", part1,
-        "-i", overlay_with_audio,
-        "-i", part2,
-        "-filter_complex", "[0:v][0:a][1:v][1:a][2:v][2:a]concat=n=3:v=1:a=1[v][a]",
-        "-map", "[v]", "-map", "[a]",
-        "-c:v", "libx264", "-crf", str(crf), "-preset", preset, "-pix_fmt", "yuv420p",
-        "-c:a", "pcm_s16le",
-        "-movflags", "+faststart",
-        output_file
-    ]
-
-    # ---- Print all commands at the beginning ----
-    print("\n=========== ALL FFMPEG COMMANDS ===========")
-    for c in [cmd1, cmd2, cmd3, cmd4, cmd5, cmd6]:
-        print(" ".join(c))
-    print("==========================================\n")
-
-    # ---- Execute commands ----
-    run_cmd(cmd1, trimmed_overlay)
-    run_cmd(cmd2, main_audio)
-    run_cmd(cmd3, overlay_with_audio)
-    run_cmd(cmd4, part1)
-    run_cmd(cmd5, part2)
-    run_cmd(cmd6, output_file)
-
-    # ---- cleanup ----
-    if not keep_intermediates:
-        for f in (part1, part2, trimmed_overlay, main_audio, overlay_with_audio):
-            try:
-                os.remove(f)
-            except FileNotFoundError:
-                pass
-
-    print(f"🎉 Done: {output_file}")
-
-  
+#zoom in an image and make it a video
 def create_zoom(image_list, main_video, crf=23, preset="medium"):
     """
     Create zoom-in videos from images using FFmpeg, matching main video properties.
@@ -1888,7 +1877,7 @@ def create_zoom(image_list, main_video, crf=23, preset="medium"):
         print("Running command:", " ".join(cmd))
         subprocess.run(cmd, check=True)
 
-
+#overlay videos,images and music to the original film. The overlay stuff are first rescaled and then re-encoded to match the main video
 def overlay_video_img_music(main_video, para_list, output_file, crf=18, preset="fast"):
     """
     Create a video overlay with extraction, rescaling, and music mixing.
@@ -2150,7 +2139,7 @@ def overlay_video_img_music(main_video, para_list, output_file, crf=18, preset="
     print("Generated ffmpeg command:\n", "\n".join(cmd_print))
     subprocess.run(cmd, check=True)
      
-#    if os.path.exists(temp_dir):
-#           shutil.rmtree(temp_dir)  # removes all files and subfolders inside
+    if os.path.exists(temp_dir):
+           shutil.rmtree(temp_dir)  # removes all files and subfolders inside
 
 
