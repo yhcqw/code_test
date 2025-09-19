@@ -2143,3 +2143,32 @@ def overlay_video_img_music(main_video, para_list, output_file, crf=18, preset="
            shutil.rmtree(temp_dir)  # removes all files and subfolders inside
 
 
+def compress_video(input_file, output_file, crf=23, preset="medium"):
+    """
+    Compress a video using ffmpeg while preserving original dimensions.
+    
+    Parameters:
+        input_file (str): Path to the input video file
+        output_file (str): Path to the output compressed video file
+        crf (int): Constant Rate Factor (lower = better quality, bigger file). Default: 23
+        preset (str): Compression preset (ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow). Default: "medium"
+    """
+    # Construct ffmpeg command
+    cmd = [
+        "ffmpeg",
+        "-i", input_file,
+        "-c:v", "libx264",
+        "-crf", str(crf),
+        "-preset", preset,
+        "-c:a", "copy",   # copy audio without re-encoding
+        output_file
+    ]
+    
+    # Print command for reference
+    print("Running command:", " ".join(cmd))
+    
+    # Execute command
+    subprocess.run(cmd, check=True)
+
+# Example usage:
+# compress_video("input.mp4", "output.mp4", crf=28, preset="slow")
