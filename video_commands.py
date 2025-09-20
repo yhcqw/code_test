@@ -198,36 +198,83 @@ def combine_srt(file1_path, file2_path, output_path):
     print(f"{output_path} created")
 
 
-def separate_srt_languages(input_file, language_choice, output_file):
+def separate_srt_languages(input_file, language_choice, output_file, encoding='utf-8-sig'):
+    """
+    Write an SRT containing only language 1 or 2, following these rules:
+      - Use the original entry number (index) from the file.
+      - If a block has 0 text lines -> text is empty.
+      - If a block has 1 text line -> that line is language 1; language 2 is empty.
+      - If a block has >=2 text lines -> lines alternate: even -> lang1, odd -> lang2;
+        join multiple lines for the chosen language with newline.
+      - Keep an empty line after every entry (including the last).
+    """
     language_choice = str(language_choice)
-    with open(input_file, 'r', encoding='utf-8') as f:
-        content = f.read()
-    
-    blocks = content.strip().split('\n\n')
-    output_blocks = []
-    
-    for block in blocks:
-        lines = block.split('\n')
-        if len(lines) < 3:
-            continue
-        
-        index_line = lines[0]
-        time_line = lines[1]
-        text_lines = lines[2:]
-        
-        if language_choice == '1':
-            selected_text = text_lines[0]
-        elif language_choice == '2':
-            selected_text = text_lines[1] if len(text_lines) > 1 else ''
+    if language_choice not in ('1', '2'):
+        raise ValueError("language_choice must be '1' or '2'")
+
+    # Read file robustly (handles BOM)
+    with open(input_file, 'r', encoding=encoding) as f:
+        lines = f.read().splitlines()
+
+    n = len(lines)
+    i = 0
+    blocks = []
+
+    # Parse blocks by detecting an index line followed by a time line containing '-->'
+    while i < n:
+        if lines[i].strip().isdigit() and (i + 1) < n and '-->' in lines[i + 1]:
+            index_line = lines[i].strip()
+            time_line = lines[i + 1].strip()
+            j = i + 2
+            text_lines = []
+            # collect text lines until the next "index + time" or EOF
+            while j < n:
+                if lines[j].strip().isdigit() and (j + 1) < n and '-->' in lines[j + 1]:
+                    break
+                text_lines.append(lines[j])
+                j += 1
+            # trim leading/trailing blank lines inside the block
+            while text_lines and text_lines[0].strip() == '':
+                text_lines.pop(0)
+            while text_lines and text_lines[-1].strip() == '':
+                text_lines.pop()
+            blocks.append((index_line, time_line, text_lines))
+            i = j
         else:
-            raise ValueError("Language choice must be '1' or '2'")
-        
-        new_block = f"{index_line}\n{time_line}\n{selected_text}"
-        output_blocks.append(new_block)
+            # skip stray lines until a valid block start
+            i += 1
+
+    # Build output using original indices; ALWAYS output a block for every parsed block
+    out_blocks = []
+    for index_line, time_line, text_lines in blocks:
+        if len(text_lines) == 0:
+            selected = ''
+        elif len(text_lines) == 1:
+            selected = text_lines[0] if language_choice == '1' else ''
+        else:
+            # >=2 lines: alternate assignment (0,2,4.. -> lang1; 1,3,5.. -> lang2)
+            if language_choice == '1':
+                parts = [ln for idx, ln in enumerate(text_lines) if idx % 2 == 0]
+            else:
+                parts = [ln for idx, ln in enumerate(text_lines) if idx % 2 == 1]
+            selected = '\n'.join(parts)
+
+        # create block: index, time, (maybe text). No reindexing; keep original index.
+        if selected != '':
+            block_text = f"{index_line}\n{time_line}\n{selected}"
+        else:
+            # keep index & time but empty text (we'll ensure an empty line after when joining)
+            block_text = f"{index_line}\n{time_line}"
+        out_blocks.append(block_text)
+
+    # join with one blank line between entries and ensure a blank line after the last entry
+    with open(output_file, 'w', encoding=encoding) as f:
+        f.write('\n\n'.join(out_blocks) + '\n\n')
+
+    print(f"{output_file} created ({len(out_blocks)} entries)")
+
     
-    with open(output_file, 'w', encoding='utf-8') as f:
-        f.write('\n\n'.join(output_blocks))
-    print(f"{output_file} created")
+
 
 #extracting part of the video, say 1:00-2:00 from the original video
 def trim_video(input_file, start_time, end_time, output_file,crf=18, preset = "veyfast"):
@@ -265,7 +312,6 @@ def trim_video(input_file, start_time, end_time, output_file,crf=18, preset = "v
   
 #simply the dimensions of the video.
 def get_media_dimensions(file_path):
-
         cmd_v = [
             "ffprobe",
             "-v", "error",
